@@ -1,0 +1,215 @@
+import React, { useRef, useEffect, useCallback } from 'react';
+
+interface TextEditorProps {
+  pageWidth: number;
+  pageHeight: number;
+  content: string;
+  onChange: (html: string) => void;
+  onOverflow: (overflowHtml: string, fitHtml: string) => void;
+  onFocusChange: (focused: boolean) => void;
+}
+
+const TextEditor: React.FC<TextEditorProps> = ({
+  pageWidth, pageHeight, content, onChange, onOverflow, onFocusChange
+}) => {
+  const editorRef = useRef<HTMLDivElement>(null);
+  const isInternal = useRef(false);
+  const lastClickTime = useRef(0);
+
+  useEffect(() => {
+    if (editorRef.current && !isInternal.current) {
+      const cur = editorRef.current.innerHTML;
+      const target = content || '';
+      if (cur !== target) {
+        editorRef.current.innerHTML = target;
+      }
+    }
+  }, [content, pageWidth, pageHeight]);
+
+  useEffect(() => {
+    if (!editorRef.current) return;
+    editorRef.current.style.width = pageWidth + 'px';
+    editorRef.current.style.height = pageHeight + 'px';
+  }, [pageWidth, pageHeight]);
+
+  useEffect(() => {
+    if (!editorRef.current) return;
+    editorRef.current.style.pointerEvents = 'auto';
+  }, []);
+
+  const handleInput = useCallback(() => {
+    if (!editorRef.current) return;
+    isInternal.current = true;
+    const html = editorRef.current.innerHTML;
+    onChange(html);
+    requestAnimationFrame(() => {
+      if (editorRef.current && editorRef.current.scrollHeight > editorRef.current.clientHeight + 3) {
+        const fullHtml = editorRef.current.innerHTML;
+        const paragraphs = fullHtml.split(/(?=<p[^>]*>|<div[^>]*>|<h[1-6][^>]*>|<li[^>]*>|<table[^>]*>)/gi);
+        if (paragraphs.length > 1) {
+          let fitHtml = '';
+          let overflowParts: string[] = [];
+          const testEl = editorRef.current.cloneNode(false) as HTMLDivElement;
+          testEl.style.cssText = editorRef.current.style.cssText;
+          testEl.style.position = 'fixed';
+          testEl.style.left = '-9999px';
+          testEl.style.top = '0';
+          testEl.style.width = pageWidth + 'px';
+          testEl.style.height = pageHeight + 'px';
+          testEl.style.overflow = 'hidden';
+          document.body.appendChild(testEl);
+          for (let i = 0; i < paragraphs.length; i++) {
+            testEl.innerHTML = fitHtml + paragraphs[i];
+            if (testEl.scrollHeight > pageHeight + 3) {
+              overflowParts = paragraphs.slice(i);
+              break;
+            }
+            fitHtml += paragraphs[i];
+          }
+          document.body.removeChild(testEl);
+          if (overflowParts.length > 0) {
+            editorRef.current.innerHTML = fitHtml;
+            onChange(fitHtml);
+            onOverflow(overflowParts.join(''), fitHtml);
+          }
+        }
+      }
+      isInternal.current = false;
+    });
+  }, [onChange, onOverflow, pageWidth, pageHeight]);
+
+  const handleFocus = useCallback(() => {
+    onFocusChange(true);
+  }, [onFocusChange]);
+
+  const handleBlur = useCallback(() => onFocusChange(false), [onFocusChange]);
+
+  const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
+    if ((e.ctrlKey || e.metaKey) && e.key === 'b') {
+      e.preventDefault();
+      document.execCommand('bold');
+    }
+    if ((e.ctrlKey || e.metaKey) && e.key === 'i') {
+      e.preventDefault();
+      document.execCommand('italic');
+    }
+    if ((e.ctrlKey || e.metaKey) && e.key === 'u') {
+      e.preventDefault();
+      document.execCommand('underline');
+    }
+    if (e.key === 'Tab') {
+      e.preventDefault();
+      document.execCommand('insertHTML', false, '&nbsp;&nbsp;&nbsp;&nbsp;');
+    }
+    e.stopPropagation();
+  }, []);
+
+  const handlePaste = useCallback((e: React.ClipboardEvent) => {
+    e.preventDefault();
+    const text = e.clipboardData.getData('text/plain');
+    if (text) {
+      document.execCommand('insertHTML', false, text.replace(/\n/g, '<br>'));
+    }
+  }, []);
+
+  const handleMouseDown = useCallback((e: React.MouseEvent) => {
+    const target = e.target as HTMLElement;
+    if (target.closest('.mini-toolbar') || target.closest('.choose-file-btn')) return;
+    e.stopPropagation();
+    if (editorRef.current && document.activeElement !== editorRef.current) {
+      editorRef.current.focus();
+    }
+    const now = Date.now();
+    if (now - lastClickTime.current < 400) {
+      const sel = window.getSelection();
+      if (sel && editorRef.current) {
+        let node = sel.anchorNode;
+        while (node && node.parentElement !== editorRef.current) {
+          node = node.parentElement;
+        }
+        if (node) {
+          const range = document.createRange();
+          range.selectNodeContents(node);
+          sel.removeAllRanges();
+          sel.addRange(range);
+        }
+      }
+    }
+    lastClickTime.current = now;
+  }, []);
+
+  useEffect(() => {
+    const el = editorRef.current;
+    if (!el) return;
+    const handleTripleClick = (e: MouseEvent) => {
+      if (e.detail === 3) {
+        const sel = window.getSelection();
+        if (sel && el.contains(e.target as Node)) {
+          let node: Node | null = e.target as Node;
+          while (node && (node as HTMLElement).parentElement !== el) {
+            node = (node as HTMLElement).parentElement;
+          }
+          if (node) {
+            const range = document.createRange();
+            range.selectNodeContents(node);
+            sel.removeAllRanges();
+            sel.addRange(range);
+            e.preventDefault();
+          }
+        }
+      }
+    };
+    el.addEventListener('mouseup', handleTripleClick);
+    return () => el.removeEventListener('mouseup', handleTripleClick);
+  }, []);
+
+  useEffect(() => {
+    if (!editorRef.current) return;
+    editorRef.current.focus();
+    const sel = window.getSelection();
+    if (sel) {
+      sel.removeAllRanges();
+      const range = document.createRange();
+      range.setStart(editorRef.current, 0);
+      range.collapse(true);
+      sel.addRange(range);
+    }
+  }, [pageWidth, pageHeight]);
+
+  return (
+    <div
+      ref={editorRef}
+      className="text-editor-overlay"
+      contentEditable
+      suppressContentEditableWarning
+      onInput={handleInput}
+      onFocus={handleFocus}
+      onBlur={handleBlur}
+      onKeyDown={handleKeyDown}
+      onPaste={handlePaste}
+      onMouseDown={handleMouseDown}
+      data-page-editor="true"
+    />
+  );
+};
+
+export function execFormatCommand(command: string, value?: string) {
+  const editor = document.querySelector('[data-page-editor="true"]');
+  if (editor) {
+    (editor as HTMLElement).focus();
+    document.execCommand(command, false, value);
+    editor.dispatchEvent(new Event('input', { bubbles: true }));
+    return true;
+  }
+  return false;
+}
+
+export function getEditorSelection(): { node: Node | null; text: string } {
+  const sel = window.getSelection();
+  if (sel && sel.rangeCount > 0) {
+    return { node: sel.anchorNode, text: sel.toString() };
+  }
+  return { node: null, text: '' };
+}
+
+export default TextEditor;
