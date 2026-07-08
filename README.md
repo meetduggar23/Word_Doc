@@ -3,6 +3,7 @@
 A modern, lightweight, and **completely free** web-based image editor built with React, TypeScript, and Fabric.js. Create, edit, and export your designs with ease!
 
 **Contributing**
+
 🚀** We're actively working on new features and improvements. If you come across a bug or think something can be improved, feel free to contribute! Open a Pull Request, and I'll review your changes. If everything looks good and meets the project's standards, I'll happily merge it. Every contribution is greatly appreciated!
 **
 
