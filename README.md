@@ -2,7 +2,7 @@
 
 A modern, lightweight, and **completely free** web-based image editor built with React, TypeScript, and Fabric.js. Create, edit, and export your designs with ease!
 
-## Contributing
+## Contributing to LM technologies
 🚀 We're actively working on new features and improvements. If you come across a bug or think something can be improved, feel free to contribute! Open a Pull Request, and I'll review your changes. If everything looks good and meets the project's standards, I'll happily merge it. Every contribution is greatly appreciated!
 
 
@@ -73,16 +73,5 @@ Export your creations in multiple formats **without any watermarks or restrictio
 ✅ **No Installation** - Runs in any modern browser  
 ✅ **Cross-Platform** - Works on Windows, Mac, Linux  
 
-## Contributing to LM technologies
-
-We welcome contributions! Here's how you can help:
-
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
-
-
-*Free forever. No strings attached.*
+## Free forever. No strings attached.
 
