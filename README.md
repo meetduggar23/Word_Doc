@@ -2,7 +2,22 @@
 
 A modern, lightweight, and **completely free** web-based image editor built with React, TypeScript, and Fabric.js. Create, edit, and export your designs with ease!
 
-## ✨ Features
+**Contributing**
+🚀** We're actively working on new features and improvements. If you come across a bug or think something can be improved, feel free to contribute! Open a Pull Request, and I'll review your changes. If everything looks good and meets the project's standards, I'll happily merge it. Every contribution is greatly appreciated!
+**
+
+We welcome contributions! Here's how you can help:
+
+1. Fork the repository
+2. Create a feature branch (`git checkout -b feature/amazing-feature`)
+3. Commit your changes (`git commit -m 'Add amazing feature'`)
+4. Push to the branch (`git push origin feature/amazing-feature`)
+5. Open a Pull Request
+
+
+*Free forever. No strings attached.*
+
+## Features
 
 ### **Free Export Options**
 Export your creations in multiple formats **without any watermarks or restrictions**:
@@ -11,7 +26,7 @@ Export your creations in multiple formats **without any watermarks or restrictio
 - **SVG** - Vector format for scalable graphics
 - **PDF** - Professional document format
 
-### 🛠️ **Editing Tools**
+### **Editing Tools**
 - Draw shapes (rectangles, circles, triangles, etc.)
 - Add and customize text
 - Freehand drawing with customizable brushes
@@ -21,14 +36,14 @@ Export your creations in multiple formats **without any watermarks or restrictio
 - Undo/Redo functionality
 - Grid and snap-to-grid options
 
-### 💡 **User-Friendly Interface**
+###  **User-Friendly Interface**
 - Clean, modern UI with Inter font family
 - Responsive design
 - Intuitive toolbar
 - Real-time preview
 - Keyboard shortcuts support
 
-## 🛠️ Tech Stack
+## Tech Stack
 
 - **React 18** - UI framework
 - **TypeScript** - Type-safe JavaScript
@@ -48,7 +63,7 @@ Export your creations in multiple formats **without any watermarks or restrictio
 3. Adjust quality settings if needed
 4. Click "Download" to save your file
 
-## 🌟 Why Choose This Editor?
+## Why Choose This Editor?
 
 ✅ **100% Free** - No subscriptions, no hidden fees  
 ✅ **Open Source** - View, modify, and contribute to the code  
@@ -58,7 +73,7 @@ Export your creations in multiple formats **without any watermarks or restrictio
 ✅ **No Installation** - Runs in any modern browser  
 ✅ **Cross-Platform** - Works on Windows, Mac, Linux  
 
-## 🤝 Contributing
+## Contributing to LM technologies
 
 We welcome contributions! Here's how you can help:
 
@@ -70,3 +85,4 @@ We welcome contributions! Here's how you can help:
 
 
 *Free forever. No strings attached.*
+
