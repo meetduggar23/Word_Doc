@@ -5,6 +5,7 @@ import Toolbar from './Toolbar';
 import PageNavigator from './PageNavigator';
 import TextEditor from './TextEditor';
 import { PageData, CommentData } from '../types';
+import { safeGetStorageItem, safeGetStorageJson, safeSetStorageItem } from '../utils/storage';
 
 function generatePdfBlob(pages: Array<{ dataUrl: string; width: number; height: number }>): Blob {
   const encoder = new TextEncoder();
@@ -69,6 +70,211 @@ function generatePdfBlob(pages: Array<{ dataUrl: string; width: number; height: 
 
 const MAX_HISTORY = 50;
 const PAGE_GAP = 30;
+const TEXT_PADDING_TOP = 96;
+const TEXT_PADDING_BOTTOM = 80;
+const TEXT_PADDING_SIDES = 96;
+const MANUAL_PAGE_BREAK_ATTR = 'data-page-break';
+const EMPTY_PAGE_HTML = '<p><br></p>';
+const AVAILABLE_FONTS = [
+  'Inter, sans-serif', 'Arial', 'Helvetica', 'Times New Roman', 'Georgia',
+  'Verdana', 'Tahoma', 'Courier New', 'Trebuchet MS',
+];
+
+type ContextMenuKind = 'text' | 'empty' | 'image' | 'shape' | 'multi' | 'group' | 'link';
+
+interface ContextMenuState {
+  x: number;
+  y: number;
+  kind: ContextMenuKind;
+}
+
+interface ContextMenuAction {
+  id: string;
+  label: string;
+  shortcut?: string;
+  danger?: boolean;
+  disabled?: boolean;
+  onClick: () => void;
+}
+
+function createMeasureSurface(pageWidth: number, pageHeight: number): HTMLDivElement {
+  const el = document.createElement('div');
+  el.style.cssText = [
+    'position:fixed',
+    'left:-99999px',
+    'top:0',
+    `width:${Math.max(1, pageWidth - TEXT_PADDING_SIDES * 2)}px`,
+    `min-height:${pageHeight}px`,
+    `padding:${TEXT_PADDING_TOP}px ${TEXT_PADDING_SIDES}px ${TEXT_PADDING_BOTTOM}px`,
+    "font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif",
+    'font-size:14px',
+    'line-height:1.6',
+    'word-wrap:break-word',
+    'white-space:pre-wrap',
+    'box-sizing:border-box',
+    'overflow:hidden',
+    'visibility:hidden',
+    'pointer-events:none',
+  ].join(';');
+  document.body.appendChild(el);
+  return el;
+}
+
+function measureHtml(surface: HTMLDivElement, html: string): number {
+  surface.innerHTML = html || EMPTY_PAGE_HTML;
+  return surface.scrollHeight;
+}
+
+function isManualPageBreakNode(node: Node): boolean {
+  return node.nodeType === Node.ELEMENT_NODE && (node as HTMLElement).getAttribute(MANUAL_PAGE_BREAK_ATTR) === 'true';
+}
+
+function splitNodeToFit(
+  node: Node,
+  surface: HTMLDivElement,
+  pageHeight: number
+): { fitHtml: string; overflowHtml: string } {
+  if (node.nodeType === Node.TEXT_NODE) {
+    const text = node.nodeValue || '';
+    if (!text) return { fitHtml: '', overflowHtml: '' };
+    const test = document.createElement('div');
+    const textNode = document.createTextNode('');
+    test.appendChild(textNode);
+    let low = 0;
+    let high = text.length;
+    let best = 0;
+    while (low <= high) {
+      const mid = Math.floor((low + high) / 2);
+      textNode.nodeValue = text.slice(0, mid);
+      if (measureHtml(surface, test.innerHTML) <= pageHeight) {
+        best = mid;
+        low = mid + 1;
+      } else {
+        high = mid - 1;
+      }
+    }
+    return {
+      fitHtml: text.slice(0, best),
+      overflowHtml: text.slice(best),
+    };
+  }
+
+  if (node.nodeType !== Node.ELEMENT_NODE) {
+    return { fitHtml: '', overflowHtml: node.textContent || '' };
+  }
+
+  const element = node as HTMLElement;
+  const fitEl = element.cloneNode(false) as HTMLElement;
+  const overflowEl = element.cloneNode(false) as HTMLElement;
+  const children = Array.from(element.childNodes);
+  let overflowMode = false;
+
+  for (const child of children) {
+    if (isManualPageBreakNode(child)) {
+      overflowMode = true;
+      continue;
+    }
+
+    if (overflowMode) {
+      overflowEl.appendChild(child.cloneNode(true));
+      continue;
+    }
+
+    const childClone = child.cloneNode(true);
+    fitEl.appendChild(childClone);
+
+    if (measureHtml(surface, fitEl.innerHTML) <= pageHeight) {
+      continue;
+    }
+
+    fitEl.removeChild(childClone);
+
+    if (fitEl.childNodes.length === 0) {
+      if (child.nodeType === Node.TEXT_NODE) {
+        const original = child.nodeValue || '';
+        const textClone = document.createTextNode('');
+        fitEl.appendChild(textClone);
+
+        let low = 0;
+        let high = original.length;
+        let best = 0;
+        while (low <= high) {
+          const mid = Math.floor((low + high) / 2);
+          textClone.nodeValue = original.slice(0, mid);
+          if (measureHtml(surface, fitEl.innerHTML) <= pageHeight) {
+            best = mid;
+            low = mid + 1;
+          } else {
+            high = mid - 1;
+          }
+        }
+
+        if (best > 0) {
+          textClone.nodeValue = original.slice(0, best);
+          overflowEl.appendChild(document.createTextNode(original.slice(best)));
+          overflowMode = true;
+        } else {
+          fitEl.removeChild(textClone);
+          overflowEl.appendChild(document.createTextNode(original));
+          overflowMode = true;
+        }
+        continue;
+      }
+
+      const splitChild = splitNodeToFit(child, surface, pageHeight);
+      if (splitChild.fitHtml) {
+        fitEl.insertAdjacentHTML('beforeend', splitChild.fitHtml);
+      }
+      if (splitChild.overflowHtml) {
+        overflowEl.insertAdjacentHTML('beforeend', splitChild.overflowHtml);
+      }
+      overflowMode = true;
+      continue;
+    }
+
+    overflowMode = true;
+    overflowEl.appendChild(child.cloneNode(true));
+  }
+
+  return {
+    fitHtml: fitEl.innerHTML,
+    overflowHtml: overflowEl.innerHTML,
+  };
+}
+
+function paginateContent(html: string, pageWidth: number, pageHeight: number, columns = 1): string[] {
+  const sourceHtml = html && html.trim() ? html : EMPTY_PAGE_HTML;
+  const source = document.createElement('div');
+  source.innerHTML = sourceHtml;
+  const surface = createMeasureSurface(pageWidth, pageHeight);
+  if (columns > 1) {
+    surface.style.columnCount = String(columns);
+    surface.style.columnGap = '32px';
+  }
+  const pages: string[] = [];
+  let remaining = source.innerHTML;
+
+  try {
+    while (true) {
+      source.innerHTML = remaining || EMPTY_PAGE_HTML;
+      const split = splitNodeToFit(source, surface, pageHeight);
+      const fitHtml = split.fitHtml;
+      const overflowHtml = split.overflowHtml;
+
+      pages.push(fitHtml || EMPTY_PAGE_HTML);
+
+      if (!overflowHtml.trim() || overflowHtml === remaining) {
+        break;
+      }
+
+      remaining = overflowHtml;
+    }
+  } finally {
+    surface.remove();
+  }
+
+  return pages.length > 0 ? pages : [EMPTY_PAGE_HTML];
+}
 
 const PAGE_SIZES: Record<string, { w: number; h: number }> = {
   'a4-portrait': { w: 794, h: 1123 },
@@ -96,9 +302,11 @@ const SYMBOLS = ['©','®','™','€','£','¥','¢','§','¶','•','†','‡
 const ZOOM_LEVELS = [0.1, 0.25, 0.5, 0.75, 1, 1.25, 1.5, 2, 3, 4, 5];
 
 interface EditorProps {
+  docName: string;
+  setDocName: React.Dispatch<React.SetStateAction<string>>;
 }
 
-const Editor: React.FC<EditorProps> = () => {
+const Editor: React.FC<EditorProps> = ({ docName, setDocName }) => {
   const defaultTextColor = '#1e293b';
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const canvasInstance = useRef<any>(null);
@@ -108,21 +316,32 @@ const Editor: React.FC<EditorProps> = () => {
   const historyIdxRef = useRef(-1);
   const [hasSelection, setHasSelection] = useState(false);
   const [autoSaveEnabled, setAutoSaveEnabled] = useState(() => {
-    const stored = localStorage.getItem('worddoc-autosave');
+    const stored = safeGetStorageItem('worddoc-autosave', '');
     return stored !== 'false';
   });
   const [recentDocuments] = useState<string[]>(() => {
-    try { return JSON.parse(localStorage.getItem('worddoc-recent') || '[]'); }
-    catch { return []; }
+    return safeGetStorageJson<string[]>('worddoc-recent', []);
   });
   const autoSaveTimerRef = useRef<number | null>(null);
 
   const [isImageSelected, setIsImageSelected] = useState(false);
   const [imageDimensions, setImageDimensions] = useState<{ w: number; h: number } | null>(null);
-  const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
+  const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
+  const [contextMenuIndex, setContextMenuIndex] = useState(0);
   const [showArrangeSubmenu, setShowArrangeSubmenu] = useState(false);
   const arrangeRef = useRef<HTMLDivElement>(null);
   const [arrangeSubmenuPos, setArrangeSubmenuPos] = useState<{ top: number; left: number } | null>(null);
+  const contextMenuRef = useRef<HTMLDivElement>(null);
+  const copiedFormattingRef = useRef<null | {
+    fontFamily?: string;
+    fontSize?: string;
+    color?: string;
+    backgroundColor?: string;
+    bold?: boolean;
+    italic?: boolean;
+    underline?: boolean;
+    textAlign?: string;
+  }>(null);
   const [canvasEmpty, setCanvasEmpty] = useState(true);
   const [zoom, setZoom] = useState(1);
   const [canUndo, setCanUndo] = useState(false);
@@ -148,7 +367,7 @@ const Editor: React.FC<EditorProps> = () => {
   const [textBgColor, setTextBgColor] = useState('transparent');
   const [textLetterSpacing, setTextLetterSpacing] = useState(0);
   const [ribbonVisible, setRibbonVisible] = useState(() => {
-    const stored = localStorage.getItem('editor-ribbon');
+    const stored = safeGetStorageItem('editor-ribbon', '');
     return stored !== 'hidden';
   });
   const cropRectRef = useRef<any>(null);
@@ -172,16 +391,18 @@ const Editor: React.FC<EditorProps> = () => {
   const [showFeedbackDialog, setShowFeedbackDialog] = useState(false);
   const [feedbackText, setFeedbackText] = useState('');
   const [showHelpModal, setShowHelpModal] = useState(false);
+  const [helpTopic, setHelpTopic] = useState<'guide' | 'shortcuts' | 'about' | 'version'>('guide');
   const [showPreferences, setShowPreferences] = useState(false);
   const [columns, setColumns] = useState(1);
   const [showPageNav, setShowPageNav] = useState(false);
   const [focusMode, setFocusMode] = useState(false);
   const [showNavPane, setShowNavPane] = useState(false);
+  const [showRuler, setShowRuler] = useState(false);
+  const [showGridlines, setShowGridlines] = useState(false);
+  const [isFullscreen, setIsFullscreen] = useState(false);
   const [showQAT] = useState(true);
   const [showFormatting, setShowFormatting] = useState(true);
   const [showQATExport, setShowQATExport] = useState(false);
-  const [docName, setDocName] = useState('Untitled');
-  const [exportUsingTheme, setExportUsingTheme] = useState(false);
   const qatExportRef = useRef<HTMLDivElement>(null);
   const [exportFocusIndex, setExportFocusIndex] = useState(0);
   const exportDropdownRef = useRef<HTMLDivElement>(null);
@@ -215,26 +436,28 @@ const Editor: React.FC<EditorProps> = () => {
   const [goToPageInput, setGoToPageInput] = useState('');
   const [isTextEditing, setIsTextEditing] = useState(true);
   const isTextEditingRef = useRef(true);
-  const [pageContents, setPageContents] = useState<string[]>([]);
-  const pageContentsRef = useRef<string[]>([]);
+  const [fullDocumentHtml, setFullDocumentHtml] = useState('');
+  const fullDocumentHtmlRef = useRef('');
+  const [pageTextSegments, setPageTextSegments] = useState<string[]>(['']);
+  const pageTextSegmentsRef = useRef<string[]>(['']);
+  const paginationLockRef = useRef(false);
   const wordCount = useMemo(() => {
-    const allText = pageContents.join(' ').replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+    const allText = (fullDocumentHtml || '').replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
     return allText ? allText.split(' ').length : 0;
-  }, [pageContents]);
+  }, [fullDocumentHtml]);
   const charCount = useMemo(() => {
-    const allText = pageContents.join(' ').replace(/<[^>]*>/g, '').replace(/\s/g, '');
+    const allText = (fullDocumentHtml || '').replace(/<[^>]*>/g, '').replace(/\s/g, '');
     return allText.length;
-  }, [pageContents]);
+  }, [fullDocumentHtml]);
   const [showInsertUrlDialog, setShowInsertUrlDialog] = useState(false);
   const [imageUrl, setImageUrl] = useState('');
-  const isPaginationLockRef = useRef(false);
-
   pagesRef.current = pages;
 
   const pageWidth = pages[0]?.width || canvasInstance.current?.width || PAGE_SIZES['a4-portrait'].w;
   const pageHeight = pages[0]?.height || canvasInstance.current?.height || PAGE_SIZES['a4-portrait'].h;
 
-  void isTextEditing; void canUndo; void canRedo; void currentBorderColor; void currentBorderWidth; void currentCornerRadius;
+  void AVAILABLE_FONTS; void hasSelection; void showArrangeSubmenu; void arrangeRef; void arrangeSubmenuPos;
+  void isPositionLocked; void isTextEditing; void canUndo; void canRedo; void currentBorderColor; void currentBorderWidth; void currentCornerRadius;
   void textShadow; void textBgColor; void textLetterSpacing; void showPageNav; void setShowPageNav;
 
   const execInEditor = (command: string, value?: string) => {
@@ -420,17 +643,198 @@ const Editor: React.FC<EditorProps> = () => {
 
   const closeContextMenu = useCallback(() => {
     setContextMenu(null);
+    setContextMenuIndex(0);
     setShowArrangeSubmenu(false);
     setArrangeSubmenuPos(null);
     setShowSaveFormat(false);
   }, []);
+
+  const getContextTargetKind = useCallback((): ContextMenuKind => {
+    const c = canvasInstance.current;
+    const active = c?.getActiveObject();
+    if (active && active.type === 'activeSelection') return 'multi';
+    if (active && active.type === 'group') return 'group';
+    if (active && active.type === 'image') return 'image';
+    if (active && ['rect', 'ellipse', 'triangle', 'polygon', 'path', 'line', 'circle', 'rounded-rect', 'diamond', 'pentagon', 'hexagon', 'star', 'arrow', 'heart', 'speech-bubble', 'cloud', 'cross', 'pentagram-star', 'octagon'].includes(active.type as string)) return 'shape';
+    const editor = document.querySelector('[data-page-editor="true"]') as HTMLElement | null;
+    const sel = window.getSelection();
+    const hasTextSelection = !!editor && document.activeElement === editor && !!sel && !sel.isCollapsed && sel.toString().trim().length > 0;
+    if (hasTextSelection || isTextEditingRef.current) return 'text';
+    return 'empty';
+  }, []);
+
+  const clampContextMenuPosition = useCallback((x: number, y: number, width = 320, height = 360) => {
+    const pad = 8;
+    const maxX = Math.max(pad, window.innerWidth - width - pad);
+    const maxY = Math.max(pad, window.innerHeight - height - pad);
+    return {
+      x: Math.min(Math.max(pad, x), maxX),
+      y: Math.min(Math.max(pad, y), maxY),
+    };
+  }, []);
+
+  const openContextMenuAt = useCallback((x: number, y: number, kind?: ContextMenuKind) => {
+    const menuKind = kind || getContextTargetKind();
+    const pos = clampContextMenuPosition(x, y);
+    setContextMenu({ x: pos.x, y: pos.y, kind: menuKind });
+    setContextMenuIndex(0);
+    requestAnimationFrame(() => contextMenuRef.current?.focus());
+  }, [clampContextMenuPosition, getContextTargetKind]);
+
+  const runContextAction = useCallback((action: () => void) => {
+    closeContextMenu();
+    requestAnimationFrame(action);
+  }, [closeContextMenu]);
+
+  const escapeHtml = useCallback((value: string) => value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;'), []);
+
+  const captureFormatting = useCallback(() => {
+    const editor = document.querySelector('[data-page-editor="true"]') as HTMLElement | null;
+    const sel = window.getSelection();
+    if (editor && document.activeElement === editor) {
+      const doc = editor.ownerDocument;
+      copiedFormattingRef.current = {
+        fontFamily: doc.queryCommandValue('fontName') || undefined,
+        fontSize: doc.queryCommandValue('fontSize') || undefined,
+        color: doc.queryCommandValue('foreColor') || undefined,
+        backgroundColor: doc.queryCommandValue('backColor') || undefined,
+        bold: doc.queryCommandState('bold'),
+        italic: doc.queryCommandState('italic'),
+        underline: doc.queryCommandState('underline'),
+        textAlign: doc.queryCommandState('justifyCenter') ? 'center' : doc.queryCommandState('justifyRight') ? 'right' : doc.queryCommandState('justifyFull') ? 'justify' : 'left',
+      };
+      return true;
+    }
+    const active = canvasInstance.current?.getActiveObject() as any;
+    if (active && (active.type === 'i-text' || active.type === 'itext')) {
+      copiedFormattingRef.current = {
+        fontFamily: active.fontFamily,
+        fontSize: String(active.fontSize || ''),
+        color: active.fill,
+        backgroundColor: active.backgroundColor,
+        bold: active.fontWeight === 'bold',
+        italic: active.fontStyle === 'italic',
+        underline: !!active.underline,
+        textAlign: active.textAlign,
+      };
+      return true;
+    }
+    if (sel && !sel.isCollapsed) {
+      copiedFormattingRef.current = null;
+      return true;
+    }
+    return false;
+  }, []);
+
+  const applyCopiedFormatting = useCallback(() => {
+    const fmt = copiedFormattingRef.current;
+    const editor = document.querySelector('[data-page-editor="true"]') as HTMLElement | null;
+    if (editor && document.activeElement === editor && fmt) {
+      if (fmt.fontFamily) execInEditor('fontName', fmt.fontFamily);
+      if (fmt.fontSize) execInEditor('fontSize', fmt.fontSize);
+      if (fmt.color) execInEditor('foreColor', fmt.color);
+      if (fmt.backgroundColor) execInEditor('backColor', fmt.backgroundColor);
+      if (fmt.bold) document.execCommand('bold');
+      if (fmt.italic) document.execCommand('italic');
+      if (fmt.underline) document.execCommand('underline');
+      if (fmt.textAlign) execInEditor(fmt.textAlign === 'justify' ? 'justifyFull' : fmt.textAlign === 'center' ? 'justifyCenter' : fmt.textAlign === 'right' ? 'justifyRight' : 'justifyLeft');
+      editor.dispatchEvent(new Event('input', { bubbles: true }));
+      return true;
+    }
+    return false;
+  }, []);
+
+  const promptFont = useCallback(() => {
+    const next = window.prompt('Font family', currentFont || 'Arial');
+    if (!next) return;
+    const editor = document.querySelector('[data-page-editor="true"]') as HTMLElement | null;
+    if (editor && document.activeElement === editor) {
+      execInEditor('fontName', next);
+      return;
+    }
+    const active = canvasInstance.current?.getActiveObject() as any;
+    if (active && (active.type === 'i-text' || active.type === 'itext')) {
+      active.set('fontFamily', next);
+      canvasInstance.current?.renderAll();
+      saveState();
+    }
+  }, [currentFont, saveState]);
+
+  const promptParagraph = useCallback(() => {
+    const next = window.prompt('Paragraph alignment: left, center, right, justify', currentTextAlign || 'left');
+    if (!next) return;
+    const align = next.toLowerCase();
+    if (['left', 'center', 'right', 'justify'].includes(align)) {
+      const editor = document.querySelector('[data-page-editor="true"]') as HTMLElement | null;
+      if (editor && document.activeElement === editor) {
+        execInEditor(align === 'justify' ? 'justifyFull' : align === 'center' ? 'justifyCenter' : align === 'right' ? 'justifyRight' : 'justifyLeft');
+      } else {
+        handleTextAlign(align);
+      }
+    }
+  }, [currentTextAlign]);
+
+  const promptTextColor = useCallback(() => {
+    const next = window.prompt('Text color (hex or CSS color)', currentTextColor || defaultTextColor);
+    if (!next) return;
+    handleTextColorChange(next);
+  }, [currentTextColor, defaultTextColor]);
+
+  const promptHighlight = useCallback(() => {
+    const next = window.prompt('Highlight color', '#fff59d');
+    if (!next) return;
+    handleHighlight(next);
+  }, []);
+
+  const promptShapeFill = useCallback(() => {
+    const next = window.prompt('Shape fill color', currentShapeColor || '#3b82f6');
+    if (!next) return;
+    handleShapeColorChange(next);
+  }, [currentShapeColor]);
+
+  const promptOutlineColor = useCallback(() => {
+    const next = window.prompt('Outline color', currentBorderColor || '#000000');
+    if (!next) return;
+    handleBorderColor(next);
+  }, [currentBorderColor]);
+
+  const promptOutlineWidth = useCallback(() => {
+    const next = window.prompt('Outline width', String(currentBorderWidth || 1));
+    if (!next) return;
+    const width = Number(next);
+    if (Number.isFinite(width) && width >= 0) handleBorderWidth(width);
+  }, [currentBorderWidth]);
+
+  const pasteSpecial = useCallback(async () => {
+    const editor = document.querySelector('[data-page-editor="true"]') as HTMLElement | null;
+    if (editor && document.activeElement === editor) {
+      try {
+        const text = await navigator.clipboard.readText();
+        if (text) {
+          execInEditor('insertHTML', escapeHtml(text).replace(/\r?\n/g, '<br>'));
+          return;
+        }
+      } catch {}
+      document.execCommand('paste');
+      return;
+    }
+    handlePaste();
+  }, [escapeHtml]);
 
   const switchToPage = useCallback((index: number) => {
     const c = canvasInstance.current;
     const currentPages = pagesRef.current;
     const currentIdx = pagesRef.current.length > 0 ? activePageIndex : 0;
     if (!c || index === currentIdx || index < 0 || index >= currentPages.length) return;
-    const currentHtml = pageContentsRef.current[currentIdx] || '';
+
+    runPagination();
+
+    const currentHtml = pageTextSegmentsRef.current[currentIdx] || '';
     const currentJson = JSON.stringify(c.toJSON(['name', 'link', 'cornerRadius']));
     const thumb = generateThumbnail();
     const updatedPages = currentPages.map((p, i) =>
@@ -453,14 +857,14 @@ const Editor: React.FC<EditorProps> = () => {
         scrollContainerRef.current.scrollTo({ top: Math.max(0, scrollTop), behavior: 'smooth' });
       }
     });
-  }, [activePageIndex, generateThumbnail, checkCanvasEmpty, updateSelection, saveState, pageHeight]);
+  }, [activePageIndex, generateThumbnail, checkCanvasEmpty, updateSelection, saveState, pageHeight, runPagination]);
 
   const addPage = useCallback(() => {
     const c = canvasInstance.current;
     if (!c) return;
     const currentIdx = activePageIndex;
     const currentPages = pagesRef.current;
-    const currentHtml = pageContentsRef.current[currentIdx] || '';
+    const currentHtml = pageTextSegmentsRef.current[currentIdx] || '';
     const currentJson = JSON.stringify(c.toJSON(['name', 'link', 'cornerRadius']));
     const thumb = generateThumbnail();
     const newIdx = currentPages.length;
@@ -484,12 +888,6 @@ const Editor: React.FC<EditorProps> = () => {
       c.renderAll();
       checkCanvasEmpty();
       updateSelection();
-    });
-    setPageContents(prev => {
-      const next = [...prev];
-      next[newIdx] = '';
-      pageContentsRef.current = next;
-      return next;
     });
     setActivePageIndex(newIdx);
     requestAnimationFrame(() => {
@@ -561,45 +959,18 @@ const Editor: React.FC<EditorProps> = () => {
     switchToPage(index + 1);
   }, [switchToPage]);
 
-  const checkPageOverflow = useCallback(() => {
-    const c = canvasInstance.current;
-    if (!c) return;
-    const pageBottom = c.height - (marginsRef.current.b || 96);
-    const objects = c.getObjects();
-    let hasOverflow = false;
-    objects.forEach((obj: any) => {
-      const b = obj.getBoundingRect();
-      if (b.top + b.height > pageBottom + 50) hasOverflow = true;
-    });
-    if (hasOverflow && objects.length > 0) {
-      const currentJson = JSON.stringify(c.toJSON(['name', 'link', 'cornerRadius']));
-      const thumb = generateThumbnail();
-      const newId = `page-${Date.now()}`;
-      const newPage: PageData = {
-        id: newId,
-        name: `Page ${pagesRef.current.length + 1}`,
-        objects: JSON.stringify({ version: c.version, objects: [] }),
-        thumbnail: '',
-        width: c.width,
-        height: c.height,
-      };
-      const updatedPages = pagesRef.current.map((p, i) =>
-        i === activePageIndex ? { ...p, objects: currentJson, thumbnail: thumb } : p
-      );
-      updatedPages.push(newPage);
-      setPages(updatedPages);
-      pagesRef.current = updatedPages;
-    }
-  }, [activePageIndex, generateThumbnail]);
-
   const handlePageBreak = useCallback(() => {
-    checkPageOverflow();
+    if (execInEditor('insertHTML', '<div data-page-break="true" class="manual-page-break"><br></div>')) {
+      runPagination();
+      return;
+    }
     addPage();
-  }, [checkPageOverflow, addPage]);
+  }, [addPage, runPagination]);
 
   const handleInsertBlankPage = useCallback(() => {
+    runPagination();
     addPage();
-  }, [addPage]);
+  }, [addPage, runPagination]);
 
   const handleInsertFromUrl = useCallback(() => {
     if (!imageUrl || !canvasInstance.current) return;
@@ -653,115 +1024,88 @@ const Editor: React.FC<EditorProps> = () => {
     setShowSymbolPicker(false);
   }, [saveState]);
 
+  const repaginateDocument = useCallback((fullHtml: string, pw: number, ph: number) => {
+    const segments = paginateContent(fullHtml, pw, ph, columns);
+    pageTextSegmentsRef.current = segments;
+    setPageTextSegments(segments);
+    const neededPages = segments.length;
+    const currentPages = pagesRef.current;
+    if (neededPages > currentPages.length) {
+      const extras = neededPages - currentPages.length;
+      const newPages = [...currentPages];
+      for (let i = 0; i < extras; i++) {
+        const c = canvasInstance.current;
+        newPages.push({
+          id: `page-${Date.now()}-${i}`,
+          name: `Page ${newPages.length + 1}`,
+          objects: c ? JSON.stringify({ version: c.version, objects: [] }) : '{"version":"5.5.2","objects":[]}',
+          thumbnail: '',
+          width: pw,
+          height: ph,
+        });
+      }
+      pagesRef.current = newPages;
+      setPages(newPages);
+    } else if (neededPages < currentPages.length) {
+      const pagesToRemove = currentPages.length - neededPages;
+      let removeCount = 0;
+      const kept: PageData[] = [];
+      for (let i = 0; i < currentPages.length; i++) {
+        const hasCanvasObjs = i === activePageIndex
+          ? (canvasInstance.current?.getObjects().length || 0) > 0
+          : false;
+        const pageHasContent = pageTextSegmentsRef.current[i]?.trim() || currentPages[i].objects !== '{"version":"5.5.2","objects":[]}';
+        if (i >= neededPages && !hasCanvasObjs && !pageHasContent && removeCount < pagesToRemove) {
+          removeCount++;
+          continue;
+        }
+        kept.push(currentPages[i]);
+      }
+      if (kept.length < currentPages.length && kept.length >= 1) {
+        pagesRef.current = kept;
+        setPages(kept);
+      }
+      if (activePageIndex >= kept.length) {
+        setActivePageIndex(Math.max(0, kept.length - 1));
+      }
+    }
+    setFullDocumentHtml(fullHtml);
+    fullDocumentHtmlRef.current = fullHtml;
+  }, [activePageIndex, runPagination, columns]);
+
   const handleTextContentChange = useCallback((html: string) => {
-    if (isPaginationLockRef.current) return;
+    if (paginationLockRef.current) return;
     const currentIdx = activePageIndex;
-    setPageContents(prev => {
-      const next = [...prev];
-      next[currentIdx] = html;
-      pageContentsRef.current = next;
-      return next;
-    });
-
-    requestAnimationFrame(() => {
-      if (isPaginationLockRef.current) return;
-      const editor = document.querySelector('[data-page-editor="true"]') as HTMLElement;
-      if (!editor) return;
-      const maxContentHeight = editor.clientHeight;
-      const currentScrollHeight = editor.scrollHeight;
-      const nextIdx = currentIdx + 1;
-      const nextContent = pageContentsRef.current[nextIdx];
-      if (nextContent && nextContent.trim() && currentScrollHeight < maxContentHeight - 50) {
-        const testEl = editor.cloneNode(false) as HTMLDivElement;
-        testEl.style.cssText = editor.style.cssText;
-        testEl.style.position = 'fixed';
-        testEl.style.left = '-9999px';
-        testEl.style.top = '0';
-        testEl.style.overflow = 'hidden';
-        testEl.style.width = editor.clientWidth + 'px';
-        testEl.style.height = maxContentHeight + 'px';
-        document.body.appendChild(testEl);
-        const nextParagraphs = nextContent.split(/(?=<p[^>]*>|<div[^>]*>|<h[1-6][^>]*>|<li[^>]*>|<table[^>]*>)/gi);
-        let pulled = '';
-        let remaining: string[] = [];
-        const combined = html;
-        for (let i = 0; i < nextParagraphs.length; i++) {
-          const testHtml = combined + pulled + nextParagraphs[i];
-          testEl.innerHTML = testHtml;
-          if (testEl.scrollHeight > maxContentHeight + 3) {
-            remaining = nextParagraphs.slice(i);
-            break;
-          }
-          pulled += nextParagraphs[i];
-        }
-        document.body.removeChild(testEl);
-        if (pulled) {
-          setPageContents(prev => {
-            const next = [...prev];
-            next[currentIdx] = html + pulled;
-            const remainingHtml = remaining.join('');
-            if (remainingHtml.trim()) {
-              next[nextIdx] = remainingHtml;
-            } else {
-              next.splice(nextIdx, 1);
-              const newPages = pagesRef.current.filter((_, i) => i !== nextIdx);
-              setPages(newPages);
-              pagesRef.current = newPages;
-            }
-            pageContentsRef.current = next;
-            return next;
-          });
-        }
-      }
-
-      // Auto-delete empty page (not page 0)
-      if (!html.trim() && currentIdx > 0 && !pageContentsRef.current[currentIdx]?.trim()) {
-        const hasCanvasObjects = canvasInstance.current && canvasInstance.current.getObjects().length > 0;
-        if (!hasCanvasObjects) {
-          const newPages = pagesRef.current.filter((_, i) => i !== currentIdx);
-          setPages(newPages);
-          pagesRef.current = newPages;
-          setPageContents(prev => {
-            const next = [...prev];
-            next.splice(currentIdx, 1);
-            pageContentsRef.current = next;
-            return next;
-          });
-          setActivePageIndex(Math.max(0, currentIdx - 1));
-        }
-      }
-    });
+    const segments = pageTextSegmentsRef.current;
+    const fullHtml = segments.map((seg, i) => i === currentIdx ? html : seg).join('');
+    fullDocumentHtmlRef.current = fullHtml;
+    setFullDocumentHtml(fullHtml);
+    runPagination();
   }, [activePageIndex]);
 
-  const handleTextOverflow = useCallback((overflowHtml: string, fitHtml: string) => {
-    if (!canvasInstance.current) return;
-    if (!overflowHtml.trim()) return;
-    isPaginationLockRef.current = true;
-    const currentIdx = activePageIndex;
-    setPageContents(prev => {
-      const next = [...prev];
-      next[currentIdx] = fitHtml;
-      const nextIdx = currentIdx + 1;
-      if (next[nextIdx]) {
-        next[nextIdx] = overflowHtml + next[nextIdx];
-      } else {
-        next[nextIdx] = overflowHtml;
-      }
-      pageContentsRef.current = next;
-      return next;
-    });
-    if (currentIdx + 1 >= pagesRef.current.length) {
-      addPage();
-    } else {
-      switchToPage(currentIdx + 1);
+  function runPagination() {
+    const html = fullDocumentHtmlRef.current || '';
+    const pw = pagesRef.current[0]?.width || pageWidth;
+    const ph = pagesRef.current[0]?.height || pageHeight;
+    if (!html && !pw && !ph) return;
+    repaginateDocument(html, pw, ph);
+  }
+
+  const handleTextOverflow = useCallback((_overflowHtml: string, _fitHtml: string) => {
+    runPagination();
+    const nextIdx = activePageIndex + 1;
+    if (pageTextSegmentsRef.current[nextIdx]?.trim() && pagesRef.current[nextIdx]) {
+      setActivePageIndex(nextIdx);
     }
-    setTimeout(() => { isPaginationLockRef.current = false; }, 100);
-  }, [addPage, activePageIndex, switchToPage]);
+  }, [runPagination, activePageIndex]);
 
   const handleTextFocusChange = useCallback((focused: boolean) => {
     setIsTextEditing(focused);
     isTextEditingRef.current = focused;
-  }, []);
+    if (!focused) {
+      setTimeout(() => runPagination(), 0);
+    }
+  }, [runPagination]);
 
   const handleToggleOrientation = useCallback(() => {
     if (!canvasInstance.current) return;
@@ -828,6 +1172,12 @@ const Editor: React.FC<EditorProps> = () => {
   }, [zoom]);
 
   useEffect(() => {
+    const onFsChange = () => setIsFullscreen(!!document.fullscreenElement);
+    document.addEventListener('fullscreenchange', onFsChange);
+    return () => document.removeEventListener('fullscreenchange', onFsChange);
+  }, []);
+
+  useEffect(() => {
     if (!autoSaveEnabled) return;
     const save = () => {
       if (!canvasInstance.current || !pagesRef.current.length) return;
@@ -859,6 +1209,51 @@ const Editor: React.FC<EditorProps> = () => {
   }, [closeContextMenu]);
 
   useEffect(() => {
+    if (!contextMenu) return;
+    const handler = (e: MouseEvent) => {
+      if (contextMenuRef.current && !contextMenuRef.current.contains(e.target as Node)) {
+        closeContextMenu();
+      }
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [contextMenu, closeContextMenu]);
+
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.shiftKey && e.key === 'F10') {
+        const kind = getContextTargetKind();
+        const selection = window.getSelection();
+        if (selection && selection.rangeCount) {
+          const range = selection.getRangeAt(0);
+          const rect = range.getBoundingClientRect();
+          if (rect.width || rect.height) {
+            e.preventDefault();
+            openContextMenuAt(rect.left, rect.bottom + 8, kind);
+            return;
+          }
+        }
+        const active = canvasInstance.current?.getActiveObject();
+        if (active && typeof active.left === 'number' && typeof active.top === 'number') {
+          const bounds = active.getBoundingRect();
+          e.preventDefault();
+          openContextMenuAt(bounds.left + bounds.width / 2, bounds.top + bounds.height / 2, kind);
+          return;
+        }
+        e.preventDefault();
+        openContextMenuAt(window.innerWidth / 2, window.innerHeight / 2, kind);
+      }
+      if (e.key === 'ContextMenu') {
+        const kind = getContextTargetKind();
+        e.preventDefault();
+        openContextMenuAt(window.innerWidth / 2, window.innerHeight / 2, kind);
+      }
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [getContextTargetKind, openContextMenuAt]);
+
+  useEffect(() => {
     const syncSelection = () => {
       if (!isTextEditingRef.current) return;
       const editor = document.querySelector('[data-page-editor="true"]');
@@ -888,15 +1283,6 @@ const Editor: React.FC<EditorProps> = () => {
     document.addEventListener('selectionchange', syncSelection);
     return () => document.removeEventListener('selectionchange', syncSelection);
   }, []);
-
-  useEffect(() => {
-    setPageContents(prev => {
-      if (prev.length === pages.length) return prev;
-      const next = pages.map((p, i) => prev[i] !== undefined ? prev[i] : (p.content || ''));
-      pageContentsRef.current = next;
-      return next;
-    });
-  }, [pages]);
 
   useEffect(() => {
     if (!showQATExport) return;
@@ -1267,7 +1653,7 @@ const Editor: React.FC<EditorProps> = () => {
       saveState();
       checkCanvasEmpty();
     });
-  }, [saveState, checkCanvasEmpty]);
+  }, [saveState, checkCanvasEmpty, columns]);
 
   const handleIndent = useCallback((dir: 'in' | 'out') => {
     execInEditor(dir === 'in' ? 'indent' : 'outdent');
@@ -1432,10 +1818,25 @@ const Editor: React.FC<EditorProps> = () => {
     const dataUrl = c.toDataURL({ multiplier: 2 });
     if (active) c.setActiveObject(active);
     c.renderAll();
-    const link = document.createElement('a');
-    link.download = 'selection.png';
-    link.href = dataUrl;
-    link.click();
+    fetch(dataUrl)
+      .then(res => res.blob())
+      .then(async blob => {
+        try {
+          if ('clipboard' in navigator && 'ClipboardItem' in window) {
+            await navigator.clipboard.write([new ClipboardItem({ [blob.type]: blob })]);
+          } else {
+            const link = document.createElement('a');
+            link.download = 'selection.png';
+            link.href = dataUrl;
+            link.click();
+          }
+        } catch {
+          const link = document.createElement('a');
+          link.download = 'selection.png';
+          link.href = dataUrl;
+          link.click();
+        }
+      });
   }, []);
 
   const handleBorderColor = useCallback((color: string) => {
@@ -1614,6 +2015,7 @@ const Editor: React.FC<EditorProps> = () => {
   }, [saveState]);
 
   const handleExport = useCallback((format: string) => {
+    runPagination();
     const c = canvasInstance.current;
     if (!c || !pagesRef.current.length) return;
     const active = c.getActiveObject();
@@ -1623,7 +2025,7 @@ const Editor: React.FC<EditorProps> = () => {
     const currentJson = JSON.stringify(c.toJSON(['name', 'link', 'cornerRadius']));
     const thumb = generateThumbnail();
     const updatedPages = pagesRef.current.map((p, i) =>
-      i === currentIdx ? { ...p, objects: currentJson, thumbnail: thumb, content: pageContentsRef.current[i] || '' } : p
+      i === currentIdx ? { ...p, objects: currentJson, thumbnail: thumb, content: pageTextSegmentsRef.current[i] || '' } : p
     );
     getAllPageData(updatedPages).then((pageDataList) => {
       if (format === 'pdf') {
@@ -1713,9 +2115,12 @@ const Editor: React.FC<EditorProps> = () => {
         }
         setPages([]);
         setActivePageIndex(0);
-        setPageContents([]);
-        pageContentsRef.current = [];
-        setDocName('Untitled');
+        setFullDocumentHtml('');
+        fullDocumentHtmlRef.current = '';
+        pageTextSegmentsRef.current = [''];
+      setPageTextSegments(['']);
+      setDocName('Document1');
+      safeSetStorageItem('worddoc-docname', 'Document1');
         historyRef.current = [];
         historyIdxRef.current = -1;
         hasUnsavedChangesRef.current = false;
@@ -1733,9 +2138,12 @@ const Editor: React.FC<EditorProps> = () => {
     }
     setPages([]);
     setActivePageIndex(0);
-    setPageContents([]);
-    pageContentsRef.current = [];
-    setDocName('Untitled');
+    setFullDocumentHtml('');
+    fullDocumentHtmlRef.current = '';
+    pageTextSegmentsRef.current = [''];
+    setPageTextSegments(['']);
+    setDocName('Document1');
+    safeSetStorageItem('worddoc-docname', 'Document1');
     historyRef.current = [];
     historyIdxRef.current = -1;
     hasUnsavedChangesRef.current = false;
@@ -1748,7 +2156,7 @@ const Editor: React.FC<EditorProps> = () => {
   const handleOpenDocument = useCallback(() => {
     const input = document.createElement('input');
     input.type = 'file';
-    input.accept = '.json,.docx';
+    input.accept = '.json';
     input.onchange = (e: any) => {
       const file = e.target?.files?.[0];
       if (!file) return;
@@ -1756,15 +2164,44 @@ const Editor: React.FC<EditorProps> = () => {
       reader.onload = (ev) => {
         try {
           const data = JSON.parse(ev.target?.result as string);
-          if (data.pages && canvasInstance.current) {
+          if (Array.isArray(data.pages) && canvasInstance.current) {
             const c = canvasInstance.current;
-            c.loadFromJSON(JSON.parse(data.pages[data.activePageIndex || 0]?.objects || '{}'), () => {
+            const loadedName = typeof data.title === 'string' && data.title.trim()
+              ? data.title.trim()
+              : file.name.replace(/\.json$/i, '') || 'Document1';
+            const sourcePages = data.pages as PageData[];
+            const fullHtml = typeof data.documentHtml === 'string'
+              ? data.documentHtml
+              : sourcePages.map((p: any) => p.content || '').join('');
+            const pw = sourcePages[0]?.width || pageWidth;
+            const ph = sourcePages[0]?.height || pageHeight;
+            const nextColumns = typeof data.columns === 'number' && data.columns > 0 ? data.columns : columns;
+            const segments = paginateContent(fullHtml, pw, ph, nextColumns);
+            const normalizedPages: PageData[] = segments.map((segment, i) => {
+              const source = sourcePages[i];
+              return {
+                id: source?.id || `page-${i + 1}`,
+                name: source?.name || `Page ${i + 1}`,
+                objects: source?.objects || JSON.stringify({ version: c.version, objects: [] }),
+                thumbnail: source?.thumbnail || '',
+                width: source?.width || pw,
+                height: source?.height || ph,
+                content: segment,
+              };
+            });
+            const activeIdx = Math.min(Math.max(data.activePageIndex || 0, 0), normalizedPages.length - 1);
+            c.loadFromJSON(JSON.parse(normalizedPages[activeIdx]?.objects || '{}'), () => {
               c.renderAll();
-              setPages(data.pages || []);
-              setActivePageIndex(data.activePageIndex || 0);
-              setPageContents(data.pages?.map((p: any) => p.content || '') || []);
-              pageContentsRef.current = data.pages?.map((p: any) => p.content || '') || [];
-              setDocName(file.name.replace(/\.[^/.]+$/, ''));
+              setPages(normalizedPages);
+              pagesRef.current = normalizedPages;
+              setActivePageIndex(activeIdx);
+              setColumns(nextColumns);
+              fullDocumentHtmlRef.current = fullHtml;
+              setFullDocumentHtml(fullHtml);
+              pageTextSegmentsRef.current = segments;
+              setPageTextSegments(segments);
+              setDocName(loadedName);
+              safeSetStorageItem('worddoc-docname', loadedName);
               hasUnsavedChangesRef.current = false;
               saveState();
               checkCanvasEmpty();
@@ -1780,15 +2217,18 @@ const Editor: React.FC<EditorProps> = () => {
   }, [saveState, checkCanvasEmpty]);
 
   const handleSaveDocument = useCallback(() => {
+    runPagination();
     if (!canvasInstance.current || !pagesRef.current.length) return;
     const c = canvasInstance.current;
     const currentIdx = activePageIndex;
     const currentJson = JSON.stringify(c.toJSON(['name', 'link', 'cornerRadius']));
+    const segments = pageTextSegmentsRef.current;
     const updatedPages = pagesRef.current.map((p, i) =>
-      i === currentIdx ? { ...p, objects: currentJson, content: pageContentsRef.current[i] || '' } : p
+      i === currentIdx ? { ...p, objects: currentJson, content: segments[i] || '' } : { ...p, content: segments[i] || '' }
     );
     const docData = {
       version: '1.0', title: docName,
+      documentHtml: fullDocumentHtmlRef.current || '',
       pages: updatedPages, activePageIndex: currentIdx,
       headerContent, footerContent, headerEnabled, footerEnabled, differentFirstPage,
       comments, columns, orientation, pageBackgroundColor,
@@ -1864,6 +2304,11 @@ const Editor: React.FC<EditorProps> = () => {
 
   const handleCut = useCallback(() => {
     const c = canvasInstance.current;
+    const editor = document.querySelector('[data-page-editor="true"]') as HTMLElement | null;
+    if (editor && document.activeElement === editor) {
+      execInEditor('cut');
+      return;
+    }
     if (!c) return;
     const active = c.getActiveObject();
     if (!active) return;
@@ -1885,6 +2330,11 @@ const Editor: React.FC<EditorProps> = () => {
 
   const handleCopy = useCallback(() => {
     const c = canvasInstance.current;
+    const editor = document.querySelector('[data-page-editor="true"]') as HTMLElement | null;
+    if (editor && document.activeElement === editor) {
+      execInEditor('copy');
+      return;
+    }
     if (!c) return;
     const active = c.getActiveObject();
     if (!active) return;
@@ -1896,8 +2346,12 @@ const Editor: React.FC<EditorProps> = () => {
 
   const handlePaste = useCallback(() => {
     const c = canvasInstance.current;
+    const editor = document.querySelector('[data-page-editor="true"]') as HTMLElement | null;
+    if (editor && document.activeElement === editor) {
+      document.execCommand('paste');
+      return;
+    }
     if (!c || !clipboardRef.current) return;
-    execInEditor('paste'); return;
     clipboardRef.current.clone((cloned: any) => {
       cloned.set({ left: (cloned.left || 50) + 20, top: (cloned.top || 50) + 20, evented: true, selectable: true });
       c.add(cloned);
@@ -1943,7 +2397,7 @@ const Editor: React.FC<EditorProps> = () => {
   const handleToggleRibbon = useCallback(() => {
     setRibbonVisible(prev => {
       const next = !prev;
-      localStorage.setItem('editor-ribbon', next ? 'visible' : 'hidden');
+      safeSetStorageItem('editor-ribbon', next ? 'visible' : 'hidden');
       return next;
     });
   }, []);
@@ -1954,6 +2408,32 @@ const Editor: React.FC<EditorProps> = () => {
 
   const handleToggleNavPane = useCallback(() => {
     setShowNavPane(prev => !prev);
+  }, []);
+
+  const handleTogglePageThumbnails = useCallback(() => {
+    setShowPageNav(prev => !prev);
+  }, []);
+
+  const handleToggleRuler = useCallback(() => {
+    setShowRuler(prev => !prev);
+  }, []);
+
+  const handleToggleGridlines = useCallback(() => {
+    setShowGridlines(prev => !prev);
+  }, []);
+
+  const handleToggleFullScreen = useCallback(async () => {
+    try {
+      if (!document.fullscreenElement) {
+        await document.documentElement.requestFullscreen();
+        setIsFullscreen(true);
+      } else {
+        await document.exitFullscreen();
+        setIsFullscreen(false);
+      }
+    } catch {
+      setIsFullscreen(!!document.fullscreenElement);
+    }
   }, []);
 
   const handleToggleShowFormatting = useCallback(() => {
@@ -2118,8 +2598,10 @@ const Editor: React.FC<EditorProps> = () => {
   }, []);
 
   const handleSetColumns = useCallback((n: number) => {
-    setColumns(n);
-  }, []);
+    const next = Math.max(1, Math.min(4, n));
+    setColumns(next);
+    requestAnimationFrame(() => runPagination());
+  }, [runPagination]);
 
   const handleOpenLink = useCallback(() => {
     setShowLinkDialog(true);
@@ -2197,6 +2679,12 @@ const Editor: React.FC<EditorProps> = () => {
   }, []);
 
   const handleShowTraining = useCallback(() => {
+    setHelpTopic('guide');
+    setShowHelpModal(true);
+  }, []);
+
+  const handleShowHelpTopic = useCallback((topic: 'guide' | 'shortcuts' | 'about' | 'version') => {
+    setHelpTopic(topic);
     setShowHelpModal(true);
   }, []);
 
@@ -2458,20 +2946,46 @@ const Editor: React.FC<EditorProps> = () => {
     { key: 'svg', icon: '<polyline points="15 18 21 12 15 6"></polyline><polyline points="9 6 3 12 9 18"></polyline>', title: 'SVG Vector', desc: 'Scalable vector graphic' },
   ];
 
-  const handleExportKeydown = useCallback((e: React.KeyboardEvent) => {
-    switch (e.key) {
-      case 'ArrowDown': e.preventDefault(); setExportFocusIndex(prev => Math.min(prev + 1, exportFormats.length - 1)); break;
-      case 'ArrowUp': e.preventDefault(); setExportFocusIndex(prev => Math.max(prev - 1, 0)); break;
-      case 'Enter':
-      case ' ':
-        e.preventDefault();
-        handleExport(exportFormats[exportFocusIndex].key);
+  const handleExportKeydown = useCallback((e: React.KeyboardEvent<HTMLDivElement>) => {
+    if (!exportFormats.length) return;
+
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      setExportFocusIndex(prev => (prev + 1) % exportFormats.length);
+      return;
+    }
+
+    if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      setExportFocusIndex(prev => (prev - 1 + exportFormats.length) % exportFormats.length);
+      return;
+    }
+
+    if (e.key === 'Home') {
+      e.preventDefault();
+      setExportFocusIndex(0);
+      return;
+    }
+
+    if (e.key === 'End') {
+      e.preventDefault();
+      setExportFocusIndex(exportFormats.length - 1);
+      return;
+    }
+
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      const item = exportFormats[exportFocusIndex];
+      if (item) {
+        handleExport(item.key);
         setShowQATExport(false);
-        break;
-      case 'Escape':
-        e.preventDefault();
-        setShowQATExport(false);
-        break;
+      }
+      return;
+    }
+
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      setShowQATExport(false);
     }
   }, [exportFocusIndex, handleExport]);
 
@@ -2643,7 +3157,7 @@ const Editor: React.FC<EditorProps> = () => {
   const handleToggleAutoSave = useCallback(() => {
     setAutoSaveEnabled(prev => {
       const next = !prev;
-      localStorage.setItem('worddoc-autosave', next ? 'true' : 'false');
+      safeSetStorageItem('worddoc-autosave', next ? 'true' : 'false');
       return next;
     });
   }, []);
@@ -2656,14 +3170,206 @@ const Editor: React.FC<EditorProps> = () => {
     action();
   }, []);
 
+  const contextMenuItems = useMemo<ContextMenuAction[]>(() => {
+    const c = canvasInstance.current;
+    const active = c?.getActiveObject() as any;
+    const isTextMode = contextMenu?.kind === 'text';
+    const isImageMode = contextMenu?.kind === 'image';
+    const isShapeMode = contextMenu?.kind === 'shape';
+    const isMultiMode = contextMenu?.kind === 'multi';
+    const isGroupMode = contextMenu?.kind === 'group';
+    const hasLink = !!active?.link?.url;
+
+    const textItems: ContextMenuAction[] = [
+      { id: 'undo', label: 'Undo', shortcut: 'Ctrl+Z', disabled: !canUndo, onClick: () => (isTextMode ? document.execCommand('undo') : undo()) },
+      { id: 'redo', label: 'Redo', shortcut: 'Ctrl+Y', disabled: !canRedo, onClick: () => (isTextMode ? document.execCommand('redo') : redo()) },
+      { id: 'cut', label: 'Cut', shortcut: 'Ctrl+X', onClick: handleCut },
+      { id: 'copy', label: 'Copy', shortcut: 'Ctrl+C', onClick: handleCopy },
+      { id: 'paste', label: 'Paste', shortcut: 'Ctrl+V', onClick: handlePaste },
+      { id: 'pasteSpecial', label: 'Paste Special', onClick: () => { void pasteSpecial(); } },
+      { id: 'copyFormatting', label: 'Copy Formatting', onClick: captureFormatting },
+      { id: 'font', label: 'Font...', onClick: promptFont },
+      { id: 'paragraph', label: 'Paragraph...', onClick: promptParagraph },
+      { id: 'bullets', label: 'Bullets', onClick: () => execInEditor('insertUnorderedList') },
+      { id: 'numbering', label: 'Numbering', onClick: () => execInEditor('insertOrderedList') },
+      { id: 'bold', label: 'Bold', shortcut: 'Ctrl+B', onClick: handleBold },
+      { id: 'italic', label: 'Italic', shortcut: 'Ctrl+I', onClick: handleItalic },
+      { id: 'underline', label: 'Underline', shortcut: 'Ctrl+U', onClick: handleUnderline },
+      { id: 'strikethrough', label: 'Strikethrough', onClick: handleStrikethrough },
+      { id: 'textColor', label: 'Text Color', onClick: promptTextColor },
+      { id: 'highlight', label: 'Highlight', onClick: promptHighlight },
+      { id: 'hyperlink', label: 'Hyperlink', onClick: handleOpenLink },
+      { id: 'editHyperlink', label: 'Edit Hyperlink', disabled: !hasLink, onClick: handleOpenLink },
+      { id: 'removeHyperlink', label: 'Remove Hyperlink', disabled: !hasLink, onClick: handleRemoveLink },
+      { id: 'comment', label: 'Comment', onClick: handleAddComment },
+      { id: 'delete', label: 'Delete', danger: true, onClick: () => { if (isTextMode) execInEditor('delete'); else handleDelete(); } },
+      { id: 'selectAll', label: 'Select All', shortcut: 'Ctrl+A', onClick: handleSelectAll },
+    ];
+
+    const emptyItems: ContextMenuAction[] = [
+      { id: 'undo', label: 'Undo', shortcut: 'Ctrl+Z', disabled: !canUndo, onClick: undo },
+      { id: 'redo', label: 'Redo', shortcut: 'Ctrl+Y', disabled: !canRedo, onClick: redo },
+      { id: 'paste', label: 'Paste', shortcut: 'Ctrl+V', onClick: handlePaste },
+      { id: 'pasteSpecial', label: 'Paste Special', onClick: () => { void pasteSpecial(); } },
+      { id: 'newPage', label: 'New Page', onClick: addPage },
+      { id: 'pageBreak', label: 'Page Break', onClick: handlePageBreak },
+      { id: 'insertText', label: 'Insert Text', onClick: handleAddText },
+      { id: 'insertImage', label: 'Insert Image', onClick: handleUploadClick },
+      { id: 'insertShape', label: 'Insert Shape', onClick: () => handleAddShape('rect') },
+      { id: 'header', label: 'Header', onClick: handleToggleHeaderFooter },
+      { id: 'footer', label: 'Footer', onClick: handleToggleHeaderFooter },
+      { id: 'pageNumber', label: 'Page Number', onClick: handleInsertPageNumber },
+      { id: 'docProps', label: 'Document Properties', onClick: () => setShowPreferences(true) },
+      { id: 'selectAll', label: 'Select All', shortcut: 'Ctrl+A', onClick: handleSelectAll },
+    ];
+
+    const imageItems: ContextMenuAction[] = [
+      { id: 'replace', label: 'Replace Image', onClick: handleReplaceClick },
+      { id: 'crop', label: 'Crop', onClick: handleCrop },
+      { id: 'cropShape', label: 'Crop to Shape', onClick: handleCrop },
+      { id: 'rotateLeft', label: 'Rotate Left', onClick: () => { const obj = c?.getActiveObject(); if (obj) { obj.rotate(((obj.angle || 0) - 90 + 360) % 360); c?.renderAll(); saveState(); } } },
+      { id: 'rotateRight', label: 'Rotate Right', onClick: () => { const obj = c?.getActiveObject(); if (obj) { obj.rotate(((obj.angle || 0) + 90) % 360); c?.renderAll(); saveState(); } } },
+      { id: 'flipH', label: 'Flip Horizontal', onClick: handleFlipH },
+      { id: 'flipV', label: 'Flip Vertical', onClick: handleFlipV },
+      { id: 'lockAspect', label: 'Lock Aspect Ratio', onClick: () => { const obj = c?.getActiveObject() as any; if (!obj) return; obj.lockUniScaling = !obj.lockUniScaling; c?.renderAll(); saveState(); } },
+      { id: 'bringForward', label: 'Bring Forward', onClick: handleBringForward },
+      { id: 'sendBackward', label: 'Send Backward', onClick: handleSendBackward },
+      { id: 'bringToFront', label: 'Bring To Front', onClick: handleBringToFront },
+      { id: 'sendToBack', label: 'Send To Back', onClick: handleSendToBack },
+      { id: 'duplicate', label: 'Duplicate', onClick: handleDuplicate },
+      { id: 'delete', label: 'Delete', danger: true, onClick: handleDelete },
+    ];
+
+    const shapeItems: ContextMenuAction[] = [
+      { id: 'fill', label: 'Fill Color', onClick: promptShapeFill },
+      { id: 'outlineColor', label: 'Outline Color', onClick: promptOutlineColor },
+      { id: 'outlineWidth', label: 'Outline Width', onClick: promptOutlineWidth },
+      { id: 'shadow', label: 'Shadow', onClick: () => { const obj = c?.getActiveObject() as any; if (!obj) return; obj.set('shadow', obj.shadow ? null : new fabric.Shadow({ color: 'rgba(0,0,0,0.25)', blur: 8, offsetX: 3, offsetY: 3 })); c?.renderAll(); saveState(); } },
+      { id: 'duplicate', label: 'Duplicate', onClick: handleDuplicate },
+      { id: 'rotate', label: 'Rotate', onClick: handleRotate90 },
+      { id: 'bringForward', label: 'Bring Forward', onClick: handleBringForward },
+      { id: 'sendBackward', label: 'Send Backward', onClick: handleSendBackward },
+      { id: 'delete', label: 'Delete', danger: true, onClick: handleDelete },
+    ];
+
+    const multiItems: ContextMenuAction[] = [
+      { id: 'group', label: 'Group', disabled: !active || active.type !== 'activeSelection', onClick: handleGroup },
+      { id: 'ungroup', label: 'Ungroup', disabled: !active || active.type !== 'group', onClick: handleUngroup },
+      { id: 'alignLeft', label: 'Align Left', onClick: () => handleAlign('left') },
+      { id: 'alignCenter', label: 'Align Center', onClick: () => handleAlign('center') },
+      { id: 'alignRight', label: 'Align Right', onClick: () => handleAlign('right') },
+      { id: 'distH', label: 'Distribute Horizontally', onClick: handleDistribute },
+      { id: 'distV', label: 'Distribute Vertically', onClick: handleDistribute },
+      { id: 'duplicate', label: 'Duplicate', onClick: handleDuplicate },
+      { id: 'delete', label: 'Delete', danger: true, onClick: handleDelete },
+    ];
+
+    const groupItems: ContextMenuAction[] = [
+      { id: 'ungroup', label: 'Ungroup', onClick: handleUngroup },
+      { id: 'duplicate', label: 'Duplicate', onClick: handleDuplicate },
+      { id: 'delete', label: 'Delete', danger: true, onClick: handleDelete },
+    ];
+
+    let items: ContextMenuAction[] = emptyItems;
+    if (isTextMode) items = textItems;
+    else if (isImageMode) items = imageItems;
+    else if (isShapeMode) items = shapeItems;
+    else if (isMultiMode) items = multiItems;
+    else if (isGroupMode) items = groupItems;
+    return items;
+  }, [contextMenu?.kind, canUndo, canRedo, undo, redo, handleCut, handleCopy, handlePaste, pasteSpecial, captureFormatting, promptFont, promptParagraph, promptTextColor, promptHighlight, handleOpenLink, handleRemoveLink, handleAddComment, handleSelectAll, handleDelete, handleAddText, handleUploadClick, handleAddShape, handleToggleHeaderFooter, handleInsertPageNumber, handleReplaceClick, handleCrop, handleFlipH, handleFlipV, handleBringForward, handleSendBackward, handleBringToFront, handleSendToBack, handleDuplicate, promptShapeFill, promptOutlineColor, promptOutlineWidth, handleRotate90, handleGroup, handleUngroup, handleAlign, handleDistribute, defaultTextColor, currentTextColor, currentFont, currentTextAlign, currentShapeColor, currentBorderColor, currentBorderWidth]);
+
+  const contextMenuDividerAfter = useMemo(() => {
+    switch (contextMenu?.kind) {
+      case 'text':
+        return new Set(['redo', 'copyFormatting', 'numbering', 'highlight', 'removeHyperlink', 'comment', 'delete']);
+      case 'empty':
+        return new Set(['redo', 'pasteSpecial', 'pageBreak', 'insertShape', 'pageNumber', 'docProps']);
+      case 'image':
+        return new Set(['cropShape', 'lockAspect', 'sendToBack']);
+      case 'shape':
+        return new Set(['shadow', 'rotate', 'sendBackward']);
+      case 'multi':
+        return new Set(['ungroup', 'alignRight', 'distV']);
+      case 'group':
+        return new Set(['ungroup']);
+      default:
+        return new Set<string>();
+    }
+  }, [contextMenu?.kind]);
+
+  const handleContextMenuItemKeyDown = useCallback((e: React.KeyboardEvent) => {
+    if (!contextMenu || contextMenuRef.current == null) return;
+    const enabledItems = contextMenuItems.filter(item => !item.disabled);
+    if (!enabledItems.length) return;
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      setContextMenuIndex(prev => {
+        let next = prev;
+        do { next = (next + 1) % contextMenuItems.length; } while (contextMenuItems[next]?.disabled);
+        return next;
+      });
+      return;
+    }
+    if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      setContextMenuIndex(prev => {
+        let next = prev;
+        do { next = (next - 1 + contextMenuItems.length) % contextMenuItems.length; } while (contextMenuItems[next]?.disabled);
+        return next;
+      });
+      return;
+    }
+    if (e.key === 'Home') {
+      e.preventDefault();
+      setContextMenuIndex(contextMenuItems.findIndex(item => !item.disabled));
+      return;
+    }
+    if (e.key === 'End') {
+      e.preventDefault();
+      for (let i = contextMenuItems.length - 1; i >= 0; i--) {
+        if (!contextMenuItems[i].disabled) { setContextMenuIndex(i); break; }
+      }
+      return;
+    }
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      const item = contextMenuItems[contextMenuIndex];
+      if (item && !item.disabled) item.onClick();
+      return;
+    }
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      closeContextMenu();
+    }
+  }, [contextMenu, contextMenuIndex, contextMenuItems, closeContextMenu]);
+
+  const handleDocumentContextMenu = useCallback((e: React.MouseEvent) => {
+    const target = e.target as HTMLElement;
+    if (!target.closest('.page-wrapper') && !target.closest('.text-editor-overlay') && !target.closest('#editor-canvas')) return;
+    e.preventDefault();
+    e.stopPropagation();
+    let kind = getContextTargetKind();
+    const c = canvasInstance.current;
+    const found = c?.findTarget(e.nativeEvent as any);
+    if (found) {
+      if ((found as any).type === 'activeSelection') kind = 'multi';
+      else if ((found as any).type === 'group') kind = 'group';
+      else if ((found as any).type === 'image') kind = 'image';
+      else if (['rect', 'ellipse', 'triangle', 'polygon', 'path', 'line', 'circle', 'rounded-rect', 'diamond', 'pentagon', 'hexagon', 'star', 'arrow', 'heart', 'speech-bubble', 'cloud', 'cross', 'pentagram-star', 'octagon'].includes((found as any).type)) kind = 'shape';
+    }
+    openContextMenuAt(e.clientX, e.clientY, kind);
+  }, [getContextTargetKind, openContextMenuAt]);
+
   void orientation; void showPageBorder; void showCommentsPanel; void handleDeleteComment; void handleResolveComment; void showSymbolPicker; void showInsertUrlDialog; void imageUrl; void imageDimensions; void setImageDimensions;
   void handleTextShadowToggle; void handleTextBgColorChange; void handleTextLetterSpacingChange;
   void handleAllCaps; void handleSmallCaps;
   void handleDistribute; void handleRotate90; void handleAlignToPage;
   void handleGroup; void handleUngroup; void handleCopyAsImage;
-  void handleBorderColor; void handleBorderWidth; void handleCornerRadius;
+  void applyCopiedFormatting; void handleBorderColor; void handleBorderWidth; void handleCornerRadius;
+  void handleOpenLinkedUrl; void handleCenter; void handleLock; void handleUnlock;
   return (
-    <div className={`editor-layout${focusMode ? ' focus-mode' : ''}`}>
+    <div className={`editor-layout${focusMode ? ' focus-mode' : ''}${isFullscreen ? ' fullscreen-mode' : ''}`}>
       {!focusMode && ribbonVisible ? (
         <Toolbar
           onAddText={handleAddText}
@@ -2711,6 +3417,7 @@ const Editor: React.FC<EditorProps> = () => {
           onContactSupport={handleContactSupport}
           onFeedback={handleFeedback}
           onShowTraining={handleShowTraining}
+          onShowHelpTopic={handleShowHelpTopic}
           onZoom={handleZoom}
           onApplyListType={handleApplyListType}
           onApplyStyle={handleApplyStyle}
@@ -2758,6 +3465,7 @@ const Editor: React.FC<EditorProps> = () => {
           onSelectAll={handleSelectAll}
           onCut={handleCut}
           onCopy={handleCopy}
+          onCopyAsImage={handleCopyAsImage}
           onPaste={handlePaste}
           onLineSpacing={handleApplyLineSpacing}
           onHyperlink={() => handleOpenLink()}
@@ -2765,6 +3473,10 @@ const Editor: React.FC<EditorProps> = () => {
           onOpen={handleOpenDocument}
           onNew={handleNewDocument}
           onTextDirection={(dir) => { if (!canvasInstance.current) return; const active = canvasInstance.current.getActiveObject(); if (active && (active.type === 'i-text' || active.type === 'itext')) { active.set('direction', dir); canvasInstance.current.renderAll(); saveState(); } }}
+          onTogglePageThumbnails={handleTogglePageThumbnails}
+          onToggleRuler={handleToggleRuler}
+          onToggleGridlines={handleToggleGridlines}
+          onToggleFullScreen={handleToggleFullScreen}
         />
       ) : !focusMode ? (
         <button className="show-ribbon-float" onClick={handleToggleRibbon} title="Show Ribbon">
@@ -2820,17 +3532,6 @@ const Editor: React.FC<EditorProps> = () => {
                     </div>
                   </button>
                 ))}
-                <div style={{ borderTop: '1px solid #e5e7eb', margin: '4px 0', padding: '8px 12px' }}>
-                  <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', fontSize: 12, color: '#6b7280' }}>
-                    <input
-                      type="checkbox"
-                      checked={exportUsingTheme}
-                      onChange={e => setExportUsingTheme(e.target.checked)}
-                      style={{ cursor: 'pointer' }}
-                    />
-                    Export using current editor theme
-                  </label>
-                </div>
               </div>
             )}
           </div>
@@ -2868,25 +3569,31 @@ const Editor: React.FC<EditorProps> = () => {
         className="document-scroll-container"
         ref={scrollContainerRef}
         onClick={closeContextMenu}
-        onContextMenu={(e) => e.preventDefault()}
+        onContextMenu={handleDocumentContextMenu}
         onDrop={handleDrop}
         onDragOver={handleDragOver}
         onDragLeave={handleDragLeave}
+        style={showGridlines ? {
+          backgroundImage:
+            'linear-gradient(to right, rgba(74,108,247,0.08) 1px, transparent 1px), linear-gradient(to bottom, rgba(74,108,247,0.08) 1px, transparent 1px)',
+          backgroundSize: '24px 24px',
+          backgroundColor: 'var(--bg-primary)',
+        } : undefined}
       >
+        {showRuler && (
+          <div className="editor-ruler" aria-hidden="true">
+            <div className="editor-ruler-markers">
+              {Array.from({ length: 12 }).map((_, i) => (
+                <span key={i}>{i}</span>
+              ))}
+            </div>
+          </div>
+        )}
         <input ref={fileInputRef} type="file" accept="image/*" multiple onChange={handleFileChange} style={{ display: 'none' }} />
         <input ref={replaceInputRef} type="file" accept="image/*" onChange={handleReplaceFileChange} style={{ display: 'none' }} />
 
         {pages.length > 0 && (
           <div className="page-stack">
-            <div className="doc-title-bar">
-              <input
-                className="doc-title-input"
-                value={docName}
-                onChange={e => setDocName(e.target.value)}
-                onFocus={e => e.target.select()}
-                placeholder="Untitled"
-              />
-            </div>
             {pages.map((page, index) => {
               const pw = (page.width || pageWidth);
               const ph = (page.height || pageHeight);
@@ -2895,9 +3602,46 @@ const Editor: React.FC<EditorProps> = () => {
                 <div
                   key={page.id}
                   className={`page-wrapper${index === activePageIndex ? ' active' : ''}`}
-                  style={{ width: pw, height: ph, marginTop: isFirst ? 24 : PAGE_GAP }}
+                  style={{
+                    width: pw,
+                    height: ph,
+                    marginTop: isFirst ? 24 : PAGE_GAP,
+                    overflow: 'hidden',
+                    position: 'relative',
+                    background: pageBackgroundColor,
+                    border: showPageBorder ? '1px solid #cbd5e1' : 'none',
+                  }}
                   onClick={(e) => { e.stopPropagation(); switchToPage(index); }}
                 >
+                  {headerEnabled && (!differentFirstPage || index > 0) && (
+                    <div
+                      className="page-header-footer page-header"
+                      style={{ top: 24, opacity: 1 }}
+                    >
+                      {headerContent}
+                    </div>
+                  )}
+                  {index !== activePageIndex && (
+                    <div
+                      className="page-text-preview"
+                      style={{
+                        padding: `${TEXT_PADDING_TOP}px ${TEXT_PADDING_SIDES}px ${TEXT_PADDING_BOTTOM}px`,
+                        fontFamily: "'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif",
+                        fontSize: 14, lineHeight: 1.6,
+                        color: '#1a1a2e', wordWrap: 'break-word', whiteSpace: 'pre-wrap',
+                        boxSizing: 'border-box', overflow: 'hidden', width: '100%', height: '100%',
+                      }}
+                      dangerouslySetInnerHTML={{ __html: pageTextSegments[index] || '' }}
+                    />
+                  )}
+                  {footerEnabled && (!differentFirstPage || index > 0) && (
+                    <div
+                      className="page-header-footer page-footer"
+                      style={{ bottom: 28, opacity: 1 }}
+                    >
+                      {footerContent}
+                    </div>
+                  )}
                   {index !== activePageIndex ? (
                     <div className="page-number-label">
                       <span className="page-name-display">{page.name}</span>
@@ -2912,7 +3656,7 @@ const Editor: React.FC<EditorProps> = () => {
                       )}
                     </div>
                   ) : (
-                    <div className="page-number-label active-label">
+                    <div className="page-number-label active-label" style={{ zIndex: 20 }}>
                       {editingPageIndex === index ? (
                         <input
                           className="page-name-input"
@@ -2985,7 +3729,8 @@ const Editor: React.FC<EditorProps> = () => {
           <TextEditor
             pageWidth={pageWidth}
             pageHeight={pageHeight}
-            content={pageContents[activePageIndex] || ''}
+            columns={columns}
+            content={pageTextSegments[activePageIndex] || ''}
             onChange={handleTextContentChange}
             onOverflow={handleTextOverflow}
             onFocusChange={handleTextFocusChange}
@@ -3005,217 +3750,58 @@ const Editor: React.FC<EditorProps> = () => {
 
         {contextMenu && (
           <div
+            ref={contextMenuRef}
             className="context-menu"
             style={{ left: contextMenu.x, top: contextMenu.y }}
+            tabIndex={-1}
+            role="menu"
+            aria-label="Context menu"
+            onKeyDown={handleContextMenuItemKeyDown}
             onClick={(e) => e.stopPropagation()}
           >
-            <button className="context-menu-item" onClick={() => { handleCut(); closeContextMenu(); }}>
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <line x1="23" y1="6" x2="11" y2="18"></line>
-                <path d="M21 4a3 3 0 1 0-5.5 2.5"></path>
-                <path d="M3 20a3 3 0 1 0 5.5-2.5"></path>
-              </svg>
-              Cut
-              <span className="context-menu-shortcut">Ctrl+X</span>
-            </button>
-            <button className="context-menu-item" onClick={() => { handleCopy(); closeContextMenu(); }}>
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
-                <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
-              </svg>
-              Copy
-              <span className="context-menu-shortcut">Ctrl+C</span>
-            </button>
-            <button className="context-menu-item" onClick={() => { handlePaste(); closeContextMenu(); }}>
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path>
-                <circle cx="8.5" cy="7" r="4"></circle>
-                <polyline points="17 8 22 13 17 18"></polyline>
-              </svg>
-              Paste
-              <span className="context-menu-shortcut">Ctrl+V</span>
-            </button>
-            <div className="context-menu-divider"></div>
-            <button className="context-menu-item" onClick={() => { handleDuplicate(); closeContextMenu(); }}>
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
-                <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
-              </svg>
-              Duplicate
-              <span className="context-menu-shortcut">Ctrl+D</span>
-            </button>
-            <div className="context-menu-divider"></div>
-            <button className="context-menu-item" onClick={() => { undo(); closeContextMenu(); }}>
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <polyline points="1 4 1 10 7 10"></polyline>
-                <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"></path>
-              </svg>
-              Undo
-              <span className="context-menu-shortcut">Ctrl+Z</span>
-            </button>
-            <button className="context-menu-item" onClick={() => { redo(); closeContextMenu(); }}>
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <polyline points="23 4 23 10 17 10"></polyline>
-                <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path>
-              </svg>
-              Redo
-              <span className="context-menu-shortcut">Ctrl+Y</span>
-            </button>
-            {isTextSelected && (
-              <>
-              <div className="context-menu-divider"></div>
-              <button className="context-menu-item" onClick={() => { handleBold(); closeContextMenu(); }}>
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M6 4h8a4 4 0 0 1 4 4 4 4 0 0 1-4 4H6z"></path><path d="M6 12h9a4 4 0 0 1 4 4 4 4 0 0 1-4 4H6z"></path></svg>
-                Bold
-                <span className="context-menu-shortcut">Ctrl+B</span>
-              </button>
-              <button className="context-menu-item" onClick={() => { handleItalic(); closeContextMenu(); }}>
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="19" y1="4" x2="10" y2="4"></line><line x1="14" y1="20" x2="5" y2="20"></line><line x1="15" y1="4" x2="9" y2="20"></line></svg>
-                Italic
-                <span className="context-menu-shortcut">Ctrl+I</span>
-              </button>
-              <button className="context-menu-item" onClick={() => { handleUnderline(); closeContextMenu(); }}>
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M6 3v7a6 6 0 0 0 6 6 6 6 0 0 0 6-6V3"></path><line x1="4" y1="21" x2="20" y2="21"></line></svg>
-                Underline
-                <span className="context-menu-shortcut">Ctrl+U</span>
-              </button>
-              </>
-            )}
-            {!isPositionLocked && (
-              <>
-              <div className="context-menu-divider"></div>
-              <button className="context-menu-item" onClick={() => { handleCenter(); closeContextMenu(); }}>
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                  <line x1="12" y1="3" x2="12" y2="21"></line>
-                  <line x1="3" y1="12" x2="21" y2="12"></line>
-                </svg>
-                Center
-              </button>
-              </>
-            )}
-            {!isPositionLocked && (isImageSelected || isTextSelected || isShapeSelected) && (
-              <>
-              <div className="context-menu-divider"></div>
-              <div
-                ref={arrangeRef}
-                className="context-menu-item has-submenu"
-                onMouseEnter={() => {
-                  setShowArrangeSubmenu(true);
-                  if (arrangeRef.current) {
-                    const r = arrangeRef.current.getBoundingClientRect();
-                    const SUB_W = 180, SUB_H = 180;
-                    let left = r.right + 2;
-                    let top = r.top;
-                    if (left + SUB_W > window.innerWidth) left = r.left - SUB_W - 2;
-                    if (top + SUB_H > window.innerHeight) top = window.innerHeight - SUB_H - 8;
-                    setArrangeSubmenuPos({ top, left });
-                  }
-                }}
-                onMouseLeave={() => setShowArrangeSubmenu(false)}
-              >
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="12" y1="3" x2="12" y2="21"></line><polyline points="8 7 12 3 16 7"></polyline><polyline points="8 17 12 21 16 17"></polyline></svg>
-                Arrange
-                <span className="context-menu-submenu-arrow">▶</span>
-              </div>
-              {showArrangeSubmenu && arrangeSubmenuPos && (
-                <div
-                  className="context-submenu"
-                  style={{ position: 'fixed', left: arrangeSubmenuPos.left, top: arrangeSubmenuPos.top, zIndex: 1001 }}
-                  onMouseEnter={() => setShowArrangeSubmenu(true)}
-                  onMouseLeave={() => setShowArrangeSubmenu(false)}
+            {contextMenuItems.map((item, index) => (
+              <React.Fragment key={item.id}>
+                <button
+                  className={`context-menu-item${item.danger ? ' danger' : ''}${item.disabled ? ' disabled' : ''}${index === contextMenuIndex ? ' active' : ''}`}
+                  disabled={item.disabled}
+                  role="menuitem"
+                  onMouseEnter={() => { if (!item.disabled) setContextMenuIndex(index); }}
+                  onClick={() => { if (!item.disabled) runContextAction(item.onClick); }}
                 >
-                  <button className="context-menu-item" onClick={() => { handleBringForward(); closeContextMenu(); }}>
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="18 15 12 9 6 15"></polyline></svg>
-                    Bring Forward
-                  </button>
-                  <button className="context-menu-item" onClick={() => { handleSendBackward(); closeContextMenu(); }}>
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="6 9 12 15 18 9"></polyline></svg>
-                    Send Backward
-                  </button>
-                  <button className="context-menu-item" onClick={() => { handleBringToFront(); closeContextMenu(); }}>
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="18 15 12 9 6 15"></polyline><line x1="12" y1="3" x2="12" y2="21"></line></svg>
-                    Bring To Front
-                  </button>
-                  <button className="context-menu-item" onClick={() => { handleSendToBack(); closeContextMenu(); }}>
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="6 9 12 15 18 9"></polyline><line x1="12" y1="3" x2="12" y2="21"></line></svg>
-                    Send To Back
-                  </button>
-                </div>
-              )}
-              {isShapeSelected && (
-              <>
-              <div className="context-menu-divider"></div>
-              <div className="context-menu-item" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                <span>Shape Color</span>
-                <input type="color" value={currentShapeColor} onChange={e => handleShapeColorChange(e.target.value)} style={{ width: 24, height: 24, padding: 0, border: '1px solid var(--border-color)', borderRadius: 4, cursor: 'pointer', display: 'block' }} />
-              </div>
-              </>
-              )}
-              </>
-            )}
-            {(isImageSelected || isTextSelected || isShapeSelected) && (
-              <>
-              <div className="context-menu-divider"></div>
-              {isPositionLocked ? (
-                <button className="context-menu-item" onClick={() => { handleUnlock(); closeContextMenu(); updateSelection(); }}>
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect><path d="M7 11V7a5 5 0 0 1 9.9-1"></path></svg>
-                  {'Unlock ' + (isImageSelected ? 'Image' : isTextSelected ? 'Text' : 'Shape')}
+                  <span>{item.label}</span>
+                  {item.shortcut && <span className="context-menu-shortcut">{item.shortcut}</span>}
                 </button>
-              ) : (
-                <button className="context-menu-item" onClick={() => { handleLock(); closeContextMenu(); updateSelection(); }}>
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect><path d="M7 11V7a5 5 0 0 1 10 0v1"></path></svg>
-                  {'Lock ' + (isImageSelected ? 'Image' : isTextSelected ? 'Text' : 'Shape')}
+                {contextMenuDividerAfter.has(item.id) && index < contextMenuItems.length - 1 && <div className="context-menu-divider" />}
+              </React.Fragment>
+            ))}
+          </div>
+        )}
+        {contextMenu && (
+          <div
+            ref={contextMenuRef}
+            className="context-menu"
+            style={{ left: contextMenu.x, top: contextMenu.y }}
+            tabIndex={-1}
+            role="menu"
+            aria-label="Context menu"
+            onKeyDown={handleContextMenuItemKeyDown}
+            onClick={(e) => e.stopPropagation()}
+          >
+            {contextMenuItems.map((item, index) => (
+              <React.Fragment key={item.id}>
+                <button
+                  className={`context-menu-item${item.danger ? ' danger' : ''}${item.disabled ? ' disabled' : ''}${index === contextMenuIndex ? ' active' : ''}`}
+                  disabled={item.disabled}
+                  role="menuitem"
+                  onMouseEnter={() => { if (!item.disabled) setContextMenuIndex(index); }}
+                  onClick={() => { if (!item.disabled) runContextAction(item.onClick); }}
+                >
+                  <span>{item.label}</span>
+                  {item.shortcut && <span className="context-menu-shortcut">{item.shortcut}</span>}
                 </button>
-              )}
-              </>
-            )}
-            {!isPositionLocked && hasSelection && !isShapeSelected && (
-              <>
-              <div className="context-menu-divider"></div>
-              {(() => { const a = canvasInstance.current?.getActiveObject() as any; return a?.link?.url ? (
-                <button className="context-menu-item" onClick={() => { handleOpenLinkedUrl(); closeContextMenu(); }}>
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                    <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path>
-                    <polyline points="15 3 21 3 21 9"></polyline>
-                    <line x1="10" y1="14" x2="21" y2="3"></line>
-                  </svg>
-                  Open Link
-                </button>
-              ) : null; })()}
-              <button className="context-menu-item" onClick={() => { handleOpenLink(); }}>
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                  <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path>
-                  <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path>
-                </svg>
-                {(() => { const a = canvasInstance.current?.getActiveObject() as any; return a?.link?.url ? 'Edit Link' : 'Add Link'; })()}
-              </button>
-              </>
-            )}
-            {!isPositionLocked && (
-              <>
-              <div className="context-menu-divider"></div>
-              <button className="context-menu-item" onClick={() => { handleSelectAll(); closeContextMenu(); }}>
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                  <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
-                  <line x1="9" y1="3" x2="9" y2="21"></line>
-                  <line x1="15" y1="3" x2="15" y2="21"></line>
-                  <line x1="3" y1="9" x2="21" y2="9"></line>
-                  <line x1="3" y1="15" x2="21" y2="15"></line>
-                </svg>
-                Select All
-                <span className="context-menu-shortcut">Ctrl+A</span>
-              </button>
-              <div className="context-menu-divider"></div>
-              <button className="context-menu-item danger" onClick={() => { handleDelete(); closeContextMenu(); }}>
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                  <polyline points="3 6 5 6 21 6"></polyline>
-                  <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
-                </svg>
-                Delete
-                <span className="context-menu-shortcut">Del</span>
-              </button>
-              </>
-            )}
+                {contextMenuDividerAfter.has(item.id) && index < contextMenuItems.length - 1 && <div className="context-menu-divider" />}
+              </React.Fragment>
+            ))}
           </div>
         )}
 
@@ -3543,44 +4129,63 @@ const Editor: React.FC<EditorProps> = () => {
       {showHelpModal && (
         <div className="unsaved-modal-overlay" onClick={() => setShowHelpModal(false)}>
           <div className="unsaved-modal" onClick={e => e.stopPropagation()} role="dialog" aria-modal="true" aria-label="Help">
-            <h2 className="unsaved-modal-title" style={{ padding: '28px 32px 0' }}>Word Doc - Help</h2>
+            <h2 className="unsaved-modal-title" style={{ padding: '28px 32px 0' }}>
+              {helpTopic === 'shortcuts' ? 'Keyboard Shortcuts' : helpTopic === 'about' ? 'About Word Doc' : helpTopic === 'version' ? 'Version' : 'Word Doc - Help'}
+            </h2>
             <div style={{ padding: '16px 32px', maxHeight: '50vh', overflowY: 'auto' }}>
-              <p className="unsaved-modal-text"><strong>Welcome to Word Doc!</strong></p>
-              <p className="unsaved-modal-text" style={{ marginBottom: 16 }}>
-                Word Doc is a free, browser-based document editor. All processing is done locally in your browser - nothing is uploaded to any server.
-              </p>
-              <p className="unsaved-modal-text" style={{ fontWeight: 600, marginTop: 12 }}>Getting Started</p>
-              <ul style={{ color: 'var(--text-secondary)', fontSize: 14, lineHeight: 1.8, paddingLeft: 20, marginBottom: 16 }}>
-                <li><strong>Add Images:</strong> Click "Add Image" or drag & drop files onto the canvas</li>
-                <li><strong>Add Text:</strong> Click the "Text" button and start typing</li>
-                <li><strong>Add Shapes:</strong> Choose from various shapes in the Insert tab</li>
-                <li><strong>Multi-Page:</strong> Pages are created automatically when content overflows</li>
-                <li><strong>Navigate Pages:</strong> Use the page sidebar to switch between pages</li>
-                <li><strong>Save Document:</strong> Ctrl+S saves the entire document with all pages</li>
-                <li><strong>Export:</strong> Export as PNG, JPG, SVG, PDF, or DOCX</li>
-              </ul>
-              <p className="unsaved-modal-text" style={{ fontWeight: 600, marginTop: 12 }}>Keyboard Shortcuts</p>
-              <ul style={{ color: 'var(--text-secondary)', fontSize: 14, lineHeight: 1.8, paddingLeft: 20, marginBottom: 16 }}>
-                <li><strong>Ctrl+N</strong> - New Document</li>
-                <li><strong>Ctrl+O</strong> - Open Document</li>
-                <li><strong>Ctrl+S</strong> - Save Document</li>
-                <li><strong>Ctrl+F</strong> - Find</li>
-                <li><strong>Ctrl+H</strong> - Find & Replace</li>
-                <li><strong>Ctrl+P</strong> - Export PDF</li>
-                <li><strong>Ctrl+Z</strong> - Undo</li>
-                <li><strong>Ctrl+Y</strong> - Redo</li>
-                <li><strong>Ctrl+C</strong> - Copy</li>
-                <li><strong>Ctrl+V</strong> - Paste</li>
-                <li><strong>Ctrl+D</strong> - Duplicate</li>
-                <li><strong>Ctrl+A</strong> - Select All</li>
-                <li><strong>Delete</strong> - Delete selected</li>
-                <li><strong>Escape</strong> - Cancel crop mode</li>
-              </ul>
-              <p className="unsaved-modal-text" style={{ fontWeight: 600, marginTop: 12 }}>Microsoft Word Integration</p>
-              <ul style={{ color: 'var(--text-secondary)', fontSize: 14, lineHeight: 1.8, paddingLeft: 20 }}>
-                <li><strong>Copy as Image:</strong> Home &gt; Clipboard &gt; Copy as Image - paste directly into Word</li>
-                <li><strong>Export as .docx:</strong> Export &gt; Word (.docx) - generates a Word document with your design</li>
-              </ul>
+              {helpTopic === 'about' ? (
+                <>
+                  <p className="unsaved-modal-text"><strong>Word Doc</strong></p>
+                  <p className="unsaved-modal-text" style={{ marginBottom: 16 }}>
+                    A browser-based document editor with Word-style pages, local processing, and export support.
+                  </p>
+                  <p className="unsaved-modal-text" style={{ marginBottom: 16 }}>
+                    Version: 1.0.0
+                  </p>
+                </>
+              ) : helpTopic === 'version' ? (
+                <p className="unsaved-modal-text">Version 1.0.0</p>
+              ) : helpTopic === 'shortcuts' ? (
+                <ul style={{ color: 'var(--text-secondary)', fontSize: 14, lineHeight: 1.8, paddingLeft: 20, marginBottom: 16 }}>
+                  <li><strong>Ctrl+N</strong> - New Document</li>
+                  <li><strong>Ctrl+O</strong> - Open Document</li>
+                  <li><strong>Ctrl+S</strong> - Save Document</li>
+                  <li><strong>Ctrl+Shift+S</strong> - Save As</li>
+                  <li><strong>Ctrl+F</strong> - Find</li>
+                  <li><strong>Ctrl+H</strong> - Find & Replace</li>
+                  <li><strong>Ctrl+P</strong> - Print / PDF</li>
+                  <li><strong>Ctrl+Z</strong> - Undo</li>
+                  <li><strong>Ctrl+Y</strong> - Redo</li>
+                  <li><strong>Ctrl+C</strong> - Copy</li>
+                  <li><strong>Ctrl+V</strong> - Paste</li>
+                  <li><strong>Ctrl+X</strong> - Cut</li>
+                  <li><strong>Ctrl+A</strong> - Select All</li>
+                  <li><strong>Delete</strong> - Delete selected</li>
+                  <li><strong>Escape</strong> - Cancel crop mode</li>
+                </ul>
+              ) : (
+                <>
+                  <p className="unsaved-modal-text"><strong>Welcome to Word Doc!</strong></p>
+                  <p className="unsaved-modal-text" style={{ marginBottom: 16 }}>
+                    Word Doc is a free, browser-based document editor. All processing is done locally in your browser - nothing is uploaded to any server.
+                  </p>
+                  <p className="unsaved-modal-text" style={{ fontWeight: 600, marginTop: 12 }}>Getting Started</p>
+                  <ul style={{ color: 'var(--text-secondary)', fontSize: 14, lineHeight: 1.8, paddingLeft: 20, marginBottom: 16 }}>
+                    <li><strong>Add Images:</strong> Click "Add Image" or drag & drop files onto the canvas</li>
+                    <li><strong>Add Text:</strong> Click the "Text" button and start typing</li>
+                    <li><strong>Add Shapes:</strong> Choose from various shapes in the Insert tab</li>
+                    <li><strong>Multi-Page:</strong> Pages are created automatically when content overflows</li>
+                    <li><strong>Navigate Pages:</strong> Use the page sidebar to switch between pages</li>
+                    <li><strong>Save Document:</strong> Ctrl+S saves the entire document with all pages</li>
+                    <li><strong>Export:</strong> Export as PNG, JPG, SVG, PDF, or DOCX</li>
+                  </ul>
+                  <p className="unsaved-modal-text" style={{ fontWeight: 600, marginTop: 12 }}>Microsoft Word Integration</p>
+                  <ul style={{ color: 'var(--text-secondary)', fontSize: 14, lineHeight: 1.8, paddingLeft: 20 }}>
+                    <li><strong>Copy as Image:</strong> Home &gt; Clipboard &gt; Copy as Image - paste directly into Word</li>
+                    <li><strong>Export as .docx:</strong> Export &gt; Word (.docx) - generates a Word document with your design</li>
+                  </ul>
+                </>
+              )}
             </div>
             <div className="unsaved-modal-actions" style={{ padding: '0 32px 24px' }}>
               <button className="unsaved-modal-btn unsaved-modal-btn-primary" onClick={() => setShowHelpModal(false)}>Got It</button>

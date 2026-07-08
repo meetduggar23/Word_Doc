@@ -3,6 +3,7 @@ import React, { useRef, useEffect, useCallback } from 'react';
 interface TextEditorProps {
   pageWidth: number;
   pageHeight: number;
+  columns?: number;
   content: string;
   onChange: (html: string) => void;
   onOverflow: (overflowHtml: string, fitHtml: string) => void;
@@ -10,7 +11,7 @@ interface TextEditorProps {
 }
 
 const TextEditor: React.FC<TextEditorProps> = ({
-  pageWidth, pageHeight, content, onChange, onOverflow, onFocusChange
+  pageWidth, pageHeight, columns = 1, content, onChange, onOverflow, onFocusChange
 }) => {
   const editorRef = useRef<HTMLDivElement>(null);
   const isInternal = useRef(false);
@@ -30,7 +31,9 @@ const TextEditor: React.FC<TextEditorProps> = ({
     if (!editorRef.current) return;
     editorRef.current.style.width = pageWidth + 'px';
     editorRef.current.style.height = pageHeight + 'px';
-  }, [pageWidth, pageHeight]);
+    editorRef.current.style.columnCount = columns > 1 ? String(columns) : 'auto';
+    editorRef.current.style.columnGap = columns > 1 ? '32px' : '0';
+  }, [pageWidth, pageHeight, columns]);
 
   useEffect(() => {
     if (!editorRef.current) return;
@@ -42,40 +45,7 @@ const TextEditor: React.FC<TextEditorProps> = ({
     isInternal.current = true;
     const html = editorRef.current.innerHTML;
     onChange(html);
-    requestAnimationFrame(() => {
-      if (editorRef.current && editorRef.current.scrollHeight > editorRef.current.clientHeight + 3) {
-        const fullHtml = editorRef.current.innerHTML;
-        const paragraphs = fullHtml.split(/(?=<p[^>]*>|<div[^>]*>|<h[1-6][^>]*>|<li[^>]*>|<table[^>]*>)/gi);
-        if (paragraphs.length > 1) {
-          let fitHtml = '';
-          let overflowParts: string[] = [];
-          const testEl = editorRef.current.cloneNode(false) as HTMLDivElement;
-          testEl.style.cssText = editorRef.current.style.cssText;
-          testEl.style.position = 'fixed';
-          testEl.style.left = '-9999px';
-          testEl.style.top = '0';
-          testEl.style.width = pageWidth + 'px';
-          testEl.style.height = pageHeight + 'px';
-          testEl.style.overflow = 'hidden';
-          document.body.appendChild(testEl);
-          for (let i = 0; i < paragraphs.length; i++) {
-            testEl.innerHTML = fitHtml + paragraphs[i];
-            if (testEl.scrollHeight > pageHeight + 3) {
-              overflowParts = paragraphs.slice(i);
-              break;
-            }
-            fitHtml += paragraphs[i];
-          }
-          document.body.removeChild(testEl);
-          if (overflowParts.length > 0) {
-            editorRef.current.innerHTML = fitHtml;
-            onChange(fitHtml);
-            onOverflow(overflowParts.join(''), fitHtml);
-          }
-        }
-      }
-      isInternal.current = false;
-    });
+    isInternal.current = false;
   }, [onChange, onOverflow, pageWidth, pageHeight]);
 
   const handleFocus = useCallback(() => {

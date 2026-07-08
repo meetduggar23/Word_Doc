@@ -80,6 +80,7 @@ interface ToolbarProps {
   onContactSupport: () => void;
   onFeedback: () => void;
   onShowTraining: () => void;
+  onShowHelpTopic?: (topic: 'guide' | 'shortcuts' | 'about' | 'version') => void;
   onZoom: (dir: string) => void;
   onApplyListType: (type: 'none' | 'bullet' | 'number' | 'multi-level') => void;
   onApplyStyle: (style: string) => void;
@@ -127,6 +128,7 @@ interface ToolbarProps {
   onSelectAll?: () => void;
   onCut: () => void;
   onCopy: () => void;
+  onCopyAsImage?: () => void;
   onPaste: () => void;
   onLineSpacing: (spacing: number) => void;
   onHyperlink: () => void;
@@ -134,6 +136,10 @@ interface ToolbarProps {
   onOpen: () => void;
   onNew: () => void;
   onTextDirection: (dir: 'ltr' | 'rtl') => void;
+  onTogglePageThumbnails?: () => void;
+  onToggleRuler?: () => void;
+  onToggleGridlines?: () => void;
+  onToggleFullScreen?: () => void;
 }
 
 const Toolbar: React.FC<ToolbarProps> = ({
@@ -150,7 +156,7 @@ const Toolbar: React.FC<ToolbarProps> = ({
   isBold, onBold, isItalic, onItalic, isUnderline, onUnderline,
   currentShapeColor, onShapeColorChange,
   currentFilter, onApplyFilter,
-  onContactSupport, onFeedback, onShowTraining, onZoom,
+  onContactSupport, onFeedback, onShowTraining, onShowHelpTopic, onZoom,
   onApplyListType, onApplyStyle, onIndent, onSetPageBackground, pageBackgroundColor,
   onToggleHeaderFooter,
   onImageTransparency, onImageBorder, onImageShadow, imageTransparency, imageShadowEnabled,
@@ -164,7 +170,8 @@ const Toolbar: React.FC<ToolbarProps> = ({
   onStrikethrough, onClearFormatting,
   showFormatting, onToggleShowFormatting, onFindReplace, onSelectAll,
   onLineSpacing, onHyperlink,
-  onCut, onCopy, onPaste, onIncreaseFontSize, onDecreaseFontSize,
+  onCut, onCopy, onCopyAsImage, onPaste, onIncreaseFontSize, onDecreaseFontSize,
+  onTogglePageThumbnails, onToggleRuler, onToggleGridlines, onToggleFullScreen,
   currentStyle,
 }) => {
   const [activeTab, setActiveTab] = useState('home');
@@ -442,6 +449,13 @@ const Toolbar: React.FC<ToolbarProps> = ({
                     <button className="fluent-icon-btn" onClick={onCopy} title="Copy (Ctrl+C)" style={{ width: 30, height: 26 }}>
                       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                         <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+                      </svg>
+                    </button>
+                    <button className="fluent-icon-btn" onClick={onCopyAsImage} title="Copy as Image" style={{ width: 30, height: 26 }}>
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
+                        <circle cx="8.5" cy="8.5" r="1.5"></circle>
+                        <polyline points="21 15 16 10 5 21"></polyline>
                       </svg>
                     </button>
                   </div>
@@ -1130,6 +1144,22 @@ const Toolbar: React.FC<ToolbarProps> = ({
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="8" y1="6" x2="21" y2="6"></line><line x1="8" y1="12" x2="21" y2="12"></line><line x1="8" y1="18" x2="21" y2="18"></line><line x1="3" y1="6" x2="3.01" y2="6"></line><line x1="3" y1="12" x2="3.01" y2="12"></line><line x1="3" y1="18" x2="3.01" y2="18"></line></svg>
                     <span className="fluent-btn-label">Nav Pane</span>
                   </button>
+                  <button className="fluent-btn with-icon" onClick={onTogglePageThumbnails} title="Page Thumbnails">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="8" height="8" rx="1"></rect><rect x="13" y="3" width="8" height="8" rx="1"></rect><rect x="3" y="13" width="8" height="8" rx="1"></rect><rect x="13" y="13" width="8" height="8" rx="1"></rect></svg>
+                    <span className="fluent-btn-label">Thumbnails</span>
+                  </button>
+                  <button className="fluent-btn with-icon" onClick={onToggleRuler} title="Ruler">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 7h18"></path><path d="M3 12h12"></path><path d="M3 17h18"></path></svg>
+                    <span className="fluent-btn-label">Ruler</span>
+                  </button>
+                  <button className="fluent-btn with-icon" onClick={onToggleGridlines} title="Gridlines">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"></rect><path d="M3 9h18M3 15h18M9 3v18M15 3v18"></path></svg>
+                    <span className="fluent-btn-label">Gridlines</span>
+                  </button>
+                  <button className="fluent-btn with-icon" onClick={onToggleFullScreen} title="Full Screen">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M8 3H5a2 2 0 0 0-2 2v3"></path><path d="M16 3h3a2 2 0 0 1 2 2v3"></path><path d="M8 21H5a2 2 0 0 1-2-2v-3"></path><path d="M16 21h3a2 2 0 0 0 2-2v-3"></path></svg>
+                    <span className="fluent-btn-label">Full Screen</span>
+                  </button>
                 </div>
                 <div className="fluent-group-label">Show</div>
               </div>
@@ -1183,6 +1213,18 @@ const Toolbar: React.FC<ToolbarProps> = ({
                       <path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"></path>
                     </svg>
                     <span className="fluent-btn-label">Show Training</span>
+                  </button>
+                  <button className="fluent-btn with-icon" onClick={() => onShowHelpTopic?.('shortcuts')} title="Keyboard Shortcuts">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"></rect><path d="M7 9h.01M11 9h.01M15 9h.01M7 13h10"></path></svg>
+                    <span className="fluent-btn-label">Shortcuts</span>
+                  </button>
+                  <button className="fluent-btn with-icon" onClick={() => onShowHelpTopic?.('about')} title="About">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"></circle><path d="M12 16v-4"></path><path d="M12 8h.01"></path></svg>
+                    <span className="fluent-btn-label">About</span>
+                  </button>
+                  <button className="fluent-btn with-icon" onClick={() => onShowHelpTopic?.('version')} title="Version">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M5 4h14v16H5z"></path><path d="M8 8h8M8 12h8M8 16h5"></path></svg>
+                    <span className="fluent-btn-label">Version</span>
                   </button>
                 </div>
                 <div className="fluent-group-label">Help</div>
