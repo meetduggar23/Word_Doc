@@ -1,84 +1,68 @@
-import React, { useRef, useEffect, useState, useCallback, useMemo } from 'react';
+import React, { useRef, useEffect, useState, useCallback, useMemo, forwardRef, useImperativeHandle } from 'react';
 import { createPortal } from 'react-dom';
 import { fabric } from 'fabric';
 import Toolbar from './Toolbar';
 import PageNavigator from './PageNavigator';
 import TextEditor from './TextEditor';
-import { PageData, CommentData } from '../types';
+import { PageData, CommentData, EditorHandle } from '../types';
 import { safeGetStorageItem, safeGetStorageJson, safeSetStorageItem } from '../utils/storage';
+import { ExportManager } from '../utils/exportManager';
 
-function generatePdfBlob(pages: Array<{ dataUrl: string; width: number; height: number }>): Blob {
-  const encoder = new TextEncoder();
-  const chunks: Uint8Array[] = [];
-  const objOffsets: number[] = [];
+function unitToPx(value: number, unit: PageLayoutUnit): number {
+  return unit === 'cm' ? value * PX_PER_CM : value * PX_PER_IN;
+}
 
-  const write = (str: string) => chunks.push(encoder.encode(str));
-  const writeBinary = (data: Uint8Array) => chunks.push(data);
-  const offset = () => chunks.reduce((s, c) => s + c.length, 0);
+function pxToUnit(value: number, unit: PageLayoutUnit): number {
+  return unit === 'cm' ? value / PX_PER_CM : value / PX_PER_IN;
+}
 
-  const imgs = pages.map(p => {
-    const b64 = p.dataUrl.split(',')[1];
-    const raw = atob(b64);
-    const bytes = new Uint8Array(raw.length);
-    for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
-    return { bytes, width: p.width, height: p.height };
-  });
+function cloneMargins(margins: PageMargins): PageMargins {
+  return { ...margins };
+}
 
-  write('%PDF-1.4\n');
-
-  objOffsets[1] = offset();
-  write('1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n');
-
-  const pageRefs = imgs.map((_, i) => `${3 + i * 3} 0 R`).join(' ');
-  objOffsets[2] = offset();
-  write(`2 0 obj\n<< /Type /Pages /Kids [${pageRefs}] /Count ${imgs.length} >>\nendobj\n`);
-
-  let objNum = 3;
-  imgs.forEach((img) => {
-    const pageObjNum = objNum++;
-    const contentObjNum = objNum++;
-    const imageObjNum = objNum++;
-
-    objOffsets[pageObjNum] = offset();
-    write(`${pageObjNum} 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${img.width} ${img.height}] /Contents ${contentObjNum} 0 R /Resources << /XObject << /Im0 ${imageObjNum} 0 R >> >> >>\nendobj\n`);
-
-    const stream = `q\n${img.width} 0 0 ${img.height} 0 0 cm\n/Im0 Do\nQ\n`;
-    objOffsets[contentObjNum] = offset();
-    write(`${contentObjNum} 0 obj\n<< /Length ${stream.length} >>\nstream\n${stream}\nendstream\nendobj\n`);
-
-    objOffsets[imageObjNum] = offset();
-    write(`${imageObjNum} 0 obj\n<< /Type /XObject /Subtype /Image /Width ${img.width} /Height ${img.height} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length ${img.bytes.length} >>\nstream\n`);
-    writeBinary(img.bytes);
-    write('\nendstream\nendobj\n');
-  });
-
-  const xrefOffset = offset();
-  const numObjs = objNum;
-  let xref = `xref\n0 ${numObjs}\n0000000000 65535 f \n`;
-  for (let i = 1; i < numObjs; i++) {
-    xref += `${String(objOffsets[i]).padStart(10, '0')} 00000 n \n`;
-  }
-  write(xref);
-  write(`trailer\n<< /Size ${numObjs} /Root 1 0 R >>\nstartxref\n${xrefOffset}\n%%EOF`);
-
-  const total = chunks.reduce((s, c) => s + c.length, 0);
-  const result = new Uint8Array(total);
-  let pos = 0;
-  for (const c of chunks) { result.set(c, pos); pos += c.length; }
-  return new Blob([result], { type: 'application/pdf' });
+function createBreakMarker(kind: PageBreakKind): string {
+  if (kind === 'column') return '<div data-page-break="column" class="manual-column-break"><br></div>';
+  if (kind === 'section-next') return '<div data-page-break="section-next" class="manual-section-break-next"><br></div>';
+  if (kind === 'continuous') return '<div data-page-break="continuous" class="manual-section-break-continuous"><br></div>';
+  if (kind === 'odd') return '<div data-page-break="odd" class="manual-section-break-odd"><br></div>';
+  if (kind === 'even') return '<div data-page-break="even" class="manual-section-break-even"><br></div>';
+  return '<div data-page-break="page" class="manual-page-break"><br></div>';
 }
 
 const MAX_HISTORY = 50;
 const PAGE_GAP = 30;
-const TEXT_PADDING_TOP = 96;
-const TEXT_PADDING_BOTTOM = 80;
-const TEXT_PADDING_SIDES = 96;
 const MANUAL_PAGE_BREAK_ATTR = 'data-page-break';
 const EMPTY_PAGE_HTML = '<p><br></p>';
+const PX_PER_IN = 96;
+const PX_PER_CM = PX_PER_IN / 2.54;
 const AVAILABLE_FONTS = [
   'Inter, sans-serif', 'Arial', 'Helvetica', 'Times New Roman', 'Georgia',
   'Verdana', 'Tahoma', 'Courier New', 'Trebuchet MS',
 ];
+
+type PageLayoutUnit = 'cm' | 'in';
+type MarginPresetName = 'normal' | 'narrow' | 'moderate' | 'wide' | 'mirrored';
+type LineNumberMode = 'none' | 'continuous' | 'restart-page' | 'restart-section';
+type HyphenationMode = 'none' | 'automatic' | 'manual';
+type PageBreakKind = 'page' | 'column' | 'section-next' | 'continuous' | 'odd' | 'even';
+
+interface PageMargins {
+  top: number;
+  bottom: number;
+  left: number;
+  right: number;
+  header: number;
+  footer: number;
+  gutter: number;
+}
+
+const DEFAULT_MARGIN_PRESETS: Record<MarginPresetName, PageMargins> = {
+  normal: { top: 1, bottom: 1, left: 1, right: 1, header: 0.5, footer: 0.5, gutter: 0.2 },
+  narrow: { top: 0.5, bottom: 0.5, left: 0.5, right: 0.5, header: 0.3, footer: 0.3, gutter: 0.15 },
+  moderate: { top: 1, bottom: 1, left: 0.75, right: 0.75, header: 0.5, footer: 0.5, gutter: 0.2 },
+  wide: { top: 1, bottom: 1, left: 2, right: 2, header: 0.5, footer: 0.5, gutter: 0.25 },
+  mirrored: { top: 1, bottom: 1, left: 1, right: 1, header: 0.5, footer: 0.5, gutter: 0.25 },
+};
 
 type ContextMenuKind = 'text' | 'empty' | 'image' | 'shape' | 'multi' | 'group' | 'link';
 
@@ -91,21 +75,88 @@ interface ContextMenuState {
 interface ContextMenuAction {
   id: string;
   label: string;
+  icon?: string;
   shortcut?: string;
   danger?: boolean;
   disabled?: boolean;
-  onClick: () => void;
+  checked?: boolean;
+  children?: ContextMenuAction[];
+  onClick?: () => void;
 }
 
-function createMeasureSurface(pageWidth: number, pageHeight: number): HTMLDivElement {
+function getContentMetrics(pageWidth: number, pageHeight: number, margins: PageMargins, unit: PageLayoutUnit) {
+  const top = unitToPx(margins.top, unit);
+  const bottom = unitToPx(margins.bottom, unit);
+  const left = unitToPx(margins.left, unit);
+  const right = unitToPx(margins.right, unit);
+  const header = unitToPx(margins.header, unit);
+  const footer = unitToPx(margins.footer, unit);
+  const gutter = unitToPx(margins.gutter, unit);
+  const contentWidth = Math.max(1, pageWidth - left - right - gutter);
+  const contentHeight = Math.max(1, pageHeight - top - bottom - header - footer);
+  return { top, bottom, left, right, header, footer, gutter, contentWidth, contentHeight };
+}
+
+function resolvePageMargins(pageMargins: PageMargins, unit: PageLayoutUnit, mirrored: boolean, pageIndex = 0) {
+  const top = unitToPx(pageMargins.top, unit);
+  const bottom = unitToPx(pageMargins.bottom, unit);
+  const header = unitToPx(pageMargins.header, unit);
+  const footer = unitToPx(pageMargins.footer, unit);
+  const gutter = unitToPx(pageMargins.gutter, unit);
+  const leftRaw = unitToPx(pageMargins.left, unit);
+  const rightRaw = unitToPx(pageMargins.right, unit);
+  if (!mirrored) {
+    return {
+      top,
+      bottom,
+      left: leftRaw + gutter,
+      right: rightRaw + gutter,
+      header,
+      footer,
+      gutter,
+    };
+  }
+  const isEvenPage = pageIndex % 2 === 1;
+  const inner = leftRaw + gutter;
+  const outer = rightRaw + gutter;
+  return {
+    top,
+    bottom,
+    left: isEvenPage ? outer : inner,
+    right: isEvenPage ? inner : outer,
+    header,
+    footer,
+    gutter,
+  };
+}
+
+function createMeasureSurface(
+  pageWidth: number,
+  pageHeight: number,
+  margins: PageMargins,
+  unit: PageLayoutUnit,
+  mirrored = false,
+  pageIndex = 0,
+  hyphenation: HyphenationMode = 'none',
+): HTMLDivElement {
+  const resolved = resolvePageMargins(margins, unit, mirrored, pageIndex);
+  const metrics = getContentMetrics(pageWidth, pageHeight, {
+    top: pxToUnit(resolved.top, unit),
+    bottom: pxToUnit(resolved.bottom, unit),
+    left: pxToUnit(resolved.left, unit),
+    right: pxToUnit(resolved.right, unit),
+    header: pxToUnit(resolved.header, unit),
+    footer: pxToUnit(resolved.footer, unit),
+    gutter: pxToUnit(resolved.gutter, unit),
+  }, unit);
   const el = document.createElement('div');
   el.style.cssText = [
     'position:fixed',
     'left:-99999px',
     'top:0',
-    `width:${Math.max(1, pageWidth - TEXT_PADDING_SIDES * 2)}px`,
-    `min-height:${pageHeight}px`,
-    `padding:${TEXT_PADDING_TOP}px ${TEXT_PADDING_SIDES}px ${TEXT_PADDING_BOTTOM}px`,
+    `width:${metrics.contentWidth}px`,
+    `min-height:${metrics.contentHeight}px`,
+    `padding:${metrics.top}px ${metrics.right}px ${metrics.bottom}px ${metrics.left}px`,
     "font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif",
     'font-size:14px',
     'line-height:1.6',
@@ -115,7 +166,10 @@ function createMeasureSurface(pageWidth: number, pageHeight: number): HTMLDivEle
     'overflow:hidden',
     'visibility:hidden',
     'pointer-events:none',
+    `hyphens:${hyphenation === 'automatic' ? 'auto' : 'manual'}`,
+    `word-break:${hyphenation === 'manual' ? 'break-word' : 'normal'}`,
   ].join(';');
+  el.style.setProperty('-webkit-hyphens', hyphenation === 'automatic' ? 'auto' : 'manual');
   document.body.appendChild(el);
   return el;
 }
@@ -242,11 +296,19 @@ function splitNodeToFit(
   };
 }
 
-function paginateContent(html: string, pageWidth: number, pageHeight: number, columns = 1): string[] {
+function paginateContent(
+  html: string,
+  pageWidth: number,
+  pageHeight: number,
+  columns = 1,
+  margins: PageMargins = DEFAULT_MARGIN_PRESETS.normal,
+  unit: PageLayoutUnit = 'in',
+  hyphenation: HyphenationMode = 'none',
+): string[] {
   const sourceHtml = html && html.trim() ? html : EMPTY_PAGE_HTML;
   const source = document.createElement('div');
   source.innerHTML = sourceHtml;
-  const surface = createMeasureSurface(pageWidth, pageHeight);
+  const surface = createMeasureSurface(pageWidth, pageHeight, margins, unit, false, 0, hyphenation);
   if (columns > 1) {
     surface.style.columnCount = String(columns);
     surface.style.columnGap = '32px';
@@ -276,27 +338,25 @@ function paginateContent(html: string, pageWidth: number, pageHeight: number, co
   return pages.length > 0 ? pages : [EMPTY_PAGE_HTML];
 }
 
-const PAGE_SIZES: Record<string, { w: number; h: number }> = {
-  'a4-portrait': { w: 794, h: 1123 },
-  'a4-landscape': { w: 1123, h: 794 },
-  'a3-portrait': { w: 1123, h: 1587 },
-  'a3-landscape': { w: 1587, h: 1123 },
+const PAGE_LAYOUT_SIZES: Record<'a4' | 'a3' | 'letter' | 'legal' | 'executive' | 'tabloid', { w: number; h: number }> = {
+  a4: { w: 794, h: 1123 },
+  a3: { w: 1123, h: 1587 },
   letter: { w: 816, h: 1056 },
   legal: { w: 816, h: 1344 },
+  executive: { w: 756, h: 1040 },
   tabloid: { w: 1056, h: 1632 },
-  square: { w: 800, h: 800 },
-  'instagram-post': { w: 1080, h: 1080 },
-  'instagram-story': { w: 1080, h: 1920 },
-  'facebook-post': { w: 1200, h: 630 },
-  'youtube-thumbnail': { w: 1280, h: 720 },
 };
 
-const MARGIN_PRESETS: Record<string, { t: number; b: number; l: number; r: number }> = {
-  normal: { t: 96, b: 96, l: 96, r: 96 },
-  narrow: { t: 48, b: 48, l: 48, r: 48 },
-  moderate: { t: 96, b: 96, l: 72, r: 72 },
-  wide: { t: 96, b: 96, l: 192, r: 192 },
-};
+function resolvePageSize(
+  preset: 'a4' | 'a3' | 'letter' | 'legal' | 'executive' | 'tabloid' | 'custom',
+  orientation: 'portrait' | 'landscape',
+  customSize: { w: number; h: number },
+) {
+  const base = preset === 'custom'
+    ? { w: customSize.w, h: customSize.h }
+    : PAGE_LAYOUT_SIZES[preset] || PAGE_LAYOUT_SIZES.a4;
+  return orientation === 'portrait' ? base : { w: base.h, h: base.w };
+}
 
 const SYMBOLS = ['©','®','™','€','£','¥','¢','§','¶','•','†','‡','←','→','↑','↓','↔','↕','✓','✗','✘','★','☆','♥','♦','♣','♠','●','○','■','□','▲','△','▼','▽','◆','◇','Ω','α','β','γ','δ','ε','θ','λ','π','σ','τ','φ','ψ','∑','∫','∞','≠','≈','≤','≥','±','×','÷','∂','√','∏','∪','∩','⊂','⊃','⊆','⊇','∈','∉','∧','∨','¬','→','⇒','⇔','∀','∃'];
 const ZOOM_LEVELS = [0.1, 0.25, 0.5, 0.75, 1, 1.25, 1.5, 2, 3, 4, 5];
@@ -306,7 +366,7 @@ interface EditorProps {
   setDocName: React.Dispatch<React.SetStateAction<string>>;
 }
 
-const Editor: React.FC<EditorProps> = ({ docName, setDocName }) => {
+const Editor = forwardRef<EditorHandle, EditorProps>(({ docName, setDocName }, ref) => {
   const defaultTextColor = '#1e293b';
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const canvasInstance = useRef<any>(null);
@@ -332,6 +392,8 @@ const Editor: React.FC<EditorProps> = ({ docName, setDocName }) => {
   const arrangeRef = useRef<HTMLDivElement>(null);
   const [arrangeSubmenuPos, setArrangeSubmenuPos] = useState<{ top: number; left: number } | null>(null);
   const contextMenuRef = useRef<HTMLDivElement>(null);
+  const [activeSubmenu, setActiveSubmenu] = useState<string | null>(null);
+  const [contextMenuSearch, setContextMenuSearch] = useState('');
   const copiedFormattingRef = useRef<null | {
     fontFamily?: string;
     fontSize?: string;
@@ -377,17 +439,42 @@ const Editor: React.FC<EditorProps> = ({ docName, setDocName }) => {
   const [showLinkDialog, setShowLinkDialog] = useState(false);
   const [linkName, setLinkName] = useState('');
   const [linkUrl, setLinkUrl] = useState('');
-  const [layoutPreset, setLayoutPreset] = useState('a4-portrait');
-  const [marginPreset, setMarginPreset] = useState('normal');
+  const [layoutPreset, setLayoutPreset] = useState<'a4' | 'a3' | 'letter' | 'legal' | 'executive' | 'tabloid' | 'custom'>('a4');
+  const [marginPreset, setMarginPreset] = useState<MarginPresetName>('narrow');
+  const [pageLayoutUnit, setPageLayoutUnit] = useState<PageLayoutUnit>('in');
   const [customSize, setCustomSize] = useState({ w: 1920, h: 1080 });
-  const marginsRef = useRef({ t: 96, b: 96, l: 96, r: 96 });
+  const [pageMargins, setPageMargins] = useState<PageMargins>(cloneMargins(DEFAULT_MARGIN_PRESETS.narrow));
+  const [lineNumbersMode, setLineNumbersMode] = useState<LineNumberMode>('none');
+  const [hyphenationMode, setHyphenationMode] = useState<HyphenationMode>('none');
+  const [showCustomMarginsDialog, setShowCustomMarginsDialog] = useState(false);
+  const [showCustomSizeDialog, setShowCustomSizeDialog] = useState(false);
+  const [showSelectionPane, setShowSelectionPane] = useState(false);
   const pendingActionRef = useRef<() => void>(() => {});
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const hasUnsavedChangesRef = useRef(false);
   const [showUnsavedModal, setShowUnsavedModal] = useState(false);
-  const [showSaveFormat, setShowSaveFormat] = useState(false);
-  const [selectedFormat, setSelectedFormat] = useState('png');
+  const [showSaveDialog, setShowSaveDialog] = useState(false);
+  const [saveDialogFormat, setSaveDialogFormat] = useState(() => localStorage.getItem('worddoc-last-export-format') || 'pdf');
+  const [saveDialogName, setSaveDialogName] = useState('');
+  const [exportLoading, setExportLoading] = useState(false);
+  const [exportSuccessFile, setExportSuccessFile] = useState('');
+  const [exportPageSize, setExportPageSize] = useState('a4');
+  const [exportOrientation, setExportOrientation] = useState('portrait');
+  const [exportMargins, setExportMargins] = useState('normal');
+  const [exportQuality, setExportQuality] = useState('standard');
+  const [exportOpenAfter, setExportOpenAfter] = useState(false);
+  const [exportIncludeBg, setExportIncludeBg] = useState(true);
+  const [exportResolution, setExportResolution] = useState('150');
+  const [exportScale, setExportScale] = useState('1');
+  const [exportTransparentBg, setExportTransparentBg] = useState(false);
+  const [exportJpegQuality, setExportJpegQuality] = useState('100');
+  const [exportDocxCompat, setExportDocxCompat] = useState('word');
+  const [exportEmbedFonts, setExportEmbedFonts] = useState(false);
+  const [exportPreserveFormatting, setExportPreserveFormatting] = useState(true);
+  const [exportJsonPretty, setExportJsonPretty] = useState(true);
   const [showSuccess, setShowSuccess] = useState(false);
+  const [showError, setShowError] = useState(false);
+  const [errorMessage, setErrorMessage] = useState('');
   const [showFeedbackDialog, setShowFeedbackDialog] = useState(false);
   const [feedbackText, setFeedbackText] = useState('');
   const [showHelpModal, setShowHelpModal] = useState(false);
@@ -402,10 +489,7 @@ const Editor: React.FC<EditorProps> = ({ docName, setDocName }) => {
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [showQAT] = useState(true);
   const [showFormatting, setShowFormatting] = useState(true);
-  const [showQATExport, setShowQATExport] = useState(false);
-  const qatExportRef = useRef<HTMLDivElement>(null);
-  const [exportFocusIndex, setExportFocusIndex] = useState(0);
-  const exportDropdownRef = useRef<HTMLDivElement>(null);
+  
   const [pageBackgroundColor, setPageBackgroundColor] = useState('#ffffff');
   const [showPageBorder, setShowPageBorder] = useState(false);
   const [orientation, setOrientation] = useState<'portrait' | 'landscape'>('portrait');
@@ -423,7 +507,6 @@ const Editor: React.FC<EditorProps> = ({ docName, setDocName }) => {
   const [comments, setComments] = useState<CommentData[]>([]);
   const [showCommentsPanel, setShowCommentsPanel] = useState(false);
   const [commentText, setCommentText] = useState('');
-
   const [pages, setPages] = useState<PageData[]>([]);
   const [activePageIndex, setActivePageIndex] = useState(0);
   const pagesRef = useRef<PageData[]>([]);
@@ -453,12 +536,24 @@ const Editor: React.FC<EditorProps> = ({ docName, setDocName }) => {
   const [imageUrl, setImageUrl] = useState('');
   pagesRef.current = pages;
 
-  const pageWidth = pages[0]?.width || canvasInstance.current?.width || PAGE_SIZES['a4-portrait'].w;
-  const pageHeight = pages[0]?.height || canvasInstance.current?.height || PAGE_SIZES['a4-portrait'].h;
+  const currentPageSize = useMemo(
+    () => resolvePageSize(layoutPreset, orientation, customSize),
+    [layoutPreset, orientation, customSize],
+  );
+  const pageWidth = pages[activePageIndex]?.width || pages[0]?.width || canvasInstance.current?.width || currentPageSize.w;
+  const pageHeight = pages[activePageIndex]?.height || pages[0]?.height || canvasInstance.current?.height || currentPageSize.h;
+  const currentMarginMetrics = useMemo(() => getContentMetrics(pageWidth, pageHeight, pageMargins, pageLayoutUnit), [pageWidth, pageHeight, pageMargins, pageLayoutUnit]);
+  const pageContentWidth = currentMarginMetrics.contentWidth;
+  const pageContentHeight = currentMarginMetrics.contentHeight;
+  const pageContentPaddingLeft = currentMarginMetrics.left + currentMarginMetrics.gutter;
+  const pageContentPaddingRight = currentMarginMetrics.right + currentMarginMetrics.gutter;
+  const pageContentPaddingTop = currentMarginMetrics.top;
+  const pageContentPaddingBottom = currentMarginMetrics.bottom;
 
   void AVAILABLE_FONTS; void hasSelection; void showArrangeSubmenu; void arrangeRef; void arrangeSubmenuPos;
   void isPositionLocked; void isTextEditing; void canUndo; void canRedo; void currentBorderColor; void currentBorderWidth; void currentCornerRadius;
   void textShadow; void textBgColor; void textLetterSpacing; void showPageNav; void setShowPageNav;
+  void pageContentWidth; void pageContentHeight;
 
   const execInEditor = (command: string, value?: string) => {
     const editor = document.querySelector('[data-page-editor="true"]') as HTMLElement;
@@ -505,6 +600,7 @@ const Editor: React.FC<EditorProps> = ({ docName, setDocName }) => {
         document.execCommand(command, false, value);
       }
       editor.dispatchEvent(new Event('input', { bubbles: true }));
+      hasUnsavedChangesRef.current = true;
       return true;
     }
     return false;
@@ -536,6 +632,58 @@ const Editor: React.FC<EditorProps> = ({ docName, setDocName }) => {
   const initDocument = useCallback(() => {
     const c = canvasInstance.current;
     if (!c) return;
+    const restoreRaw = localStorage.getItem('worddoc-pending-restore');
+    if (restoreRaw) {
+      localStorage.removeItem('worddoc-pending-restore');
+      try {
+        const data = JSON.parse(restoreRaw);
+        if (Array.isArray(data.pages)) {
+          const sourcePages = data.pages as PageData[];
+          const fullHtml = typeof data.documentHtml === 'string' ? data.documentHtml : sourcePages.map((p: any) => p.content || '').join('');
+          const pw = sourcePages[0]?.width || c.width;
+          const ph = sourcePages[0]?.height || c.height;
+          const nextColumns = typeof data.columns === 'number' && data.columns > 0 ? data.columns : 1;
+          const nextLayoutPreset = typeof data.layoutPreset === 'string' ? data.layoutPreset : 'a4';
+          const nextOrientation = data.orientation === 'landscape' ? 'landscape' : 'portrait';
+          const nextMargins = data.pageMargins && typeof data.pageMargins === 'object'
+            ? { ...cloneMargins(DEFAULT_MARGIN_PRESETS.normal), ...data.pageMargins }
+            : cloneMargins(DEFAULT_MARGIN_PRESETS.narrow);
+          const nextUnit: PageLayoutUnit = data.pageLayoutUnit === 'cm' ? 'cm' : 'in';
+          const segments = paginateContent(fullHtml, pw, ph, nextColumns, nextMargins, nextUnit, data.hyphenationMode || 'none');
+          const normalizedPages: PageData[] = segments.map((segment, i) => {
+            const source = sourcePages[i];
+            return {
+              id: source?.id || `page-${i + 1}`,
+              name: source?.name || `Page ${i + 1}`,
+              objects: source?.objects || JSON.stringify({ version: c.version, objects: [] }),
+              thumbnail: source?.thumbnail || '',
+              width: source?.width || pw,
+              height: source?.height || ph,
+              content: segment,
+            };
+          });
+          const activeIdx = Math.min(Math.max(data.activePageIndex || 0, 0), normalizedPages.length - 1);
+          c.loadFromJSON(JSON.parse(normalizedPages[activeIdx]?.objects || '{}'), () => {
+            c.renderAll();
+            setPages(normalizedPages);
+            setActivePageIndex(activeIdx);
+            if (nextLayoutPreset === 'a4' || nextLayoutPreset === 'a3' || nextLayoutPreset === 'letter' || nextLayoutPreset === 'legal' || nextLayoutPreset === 'executive' || nextLayoutPreset === 'tabloid') {
+              setLayoutPreset(nextLayoutPreset as any);
+            }
+            setOrientation(nextOrientation);
+            setPageMargins(cloneMargins(nextMargins));
+            fullDocumentHtmlRef.current = fullHtml;
+            setFullDocumentHtml(fullHtml);
+            pageTextSegmentsRef.current = segments;
+            setPageTextSegments(segments);
+            hasUnsavedChangesRef.current = false;
+            checkCanvasEmpty();
+          });
+          return;
+        }
+      } catch {}
+    }
+
     const json = JSON.stringify(c.toJSON(['name', 'link', 'cornerRadius']));
     const thumb = generateThumbnail();
     const defaultPage: PageData = {
@@ -644,9 +792,10 @@ const Editor: React.FC<EditorProps> = ({ docName, setDocName }) => {
   const closeContextMenu = useCallback(() => {
     setContextMenu(null);
     setContextMenuIndex(0);
+    setActiveSubmenu(null);
+    setContextMenuSearch('');
     setShowArrangeSubmenu(false);
     setArrangeSubmenuPos(null);
-    setShowSaveFormat(false);
   }, []);
 
   const getContextTargetKind = useCallback((): ContextMenuKind => {
@@ -663,7 +812,7 @@ const Editor: React.FC<EditorProps> = ({ docName, setDocName }) => {
     return 'empty';
   }, []);
 
-  const clampContextMenuPosition = useCallback((x: number, y: number, width = 320, height = 360) => {
+  const clampContextMenuPosition = useCallback((x: number, y: number, width = 320, height = 500) => {
     const pad = 8;
     const maxX = Math.max(pad, window.innerWidth - width - pad);
     const maxY = Math.max(pad, window.innerHeight - height - pad);
@@ -959,13 +1108,14 @@ const Editor: React.FC<EditorProps> = ({ docName, setDocName }) => {
     switchToPage(index + 1);
   }, [switchToPage]);
 
-  const handlePageBreak = useCallback(() => {
-    if (execInEditor('insertHTML', '<div data-page-break="true" class="manual-page-break"><br></div>')) {
+  const handleInsertBreak = useCallback((kind: PageBreakKind = 'page') => {
+    if (execInEditor('insertHTML', createBreakMarker(kind))) {
       runPagination();
       return;
     }
-    addPage();
-  }, [addPage, runPagination]);
+  }, [runPagination]);
+
+  const handlePageBreak = useCallback(() => handleInsertBreak('page'), [handleInsertBreak]);
 
   const handleInsertBlankPage = useCallback(() => {
     runPagination();
@@ -1025,7 +1175,7 @@ const Editor: React.FC<EditorProps> = ({ docName, setDocName }) => {
   }, [saveState]);
 
   const repaginateDocument = useCallback((fullHtml: string, pw: number, ph: number) => {
-    const segments = paginateContent(fullHtml, pw, ph, columns);
+    const segments = paginateContent(fullHtml, pw, ph, columns, pageMargins, pageLayoutUnit, hyphenationMode);
     pageTextSegmentsRef.current = segments;
     setPageTextSegments(segments);
     const neededPages = segments.length;
@@ -1071,7 +1221,7 @@ const Editor: React.FC<EditorProps> = ({ docName, setDocName }) => {
     }
     setFullDocumentHtml(fullHtml);
     fullDocumentHtmlRef.current = fullHtml;
-  }, [activePageIndex, runPagination, columns]);
+  }, [activePageIndex, columns, pageMargins, pageLayoutUnit, hyphenationMode]);
 
   const handleTextContentChange = useCallback((html: string) => {
     if (paginationLockRef.current) return;
@@ -1081,12 +1231,13 @@ const Editor: React.FC<EditorProps> = ({ docName, setDocName }) => {
     fullDocumentHtmlRef.current = fullHtml;
     setFullDocumentHtml(fullHtml);
     runPagination();
+    hasUnsavedChangesRef.current = true;
   }, [activePageIndex]);
 
   function runPagination() {
     const html = fullDocumentHtmlRef.current || '';
-    const pw = pagesRef.current[0]?.width || pageWidth;
-    const ph = pagesRef.current[0]?.height || pageHeight;
+    const pw = pagesRef.current[activePageIndex]?.width || pagesRef.current[0]?.width || pageWidth;
+    const ph = pagesRef.current[activePageIndex]?.height || pagesRef.current[0]?.height || pageHeight;
     if (!html && !pw && !ph) return;
     repaginateDocument(html, pw, ph);
   }
@@ -1110,24 +1261,31 @@ const Editor: React.FC<EditorProps> = ({ docName, setDocName }) => {
   const handleToggleOrientation = useCallback(() => {
     if (!canvasInstance.current) return;
     const c = canvasInstance.current;
-    const isPortrait = c.width < c.height;
-    const newW = isPortrait ? c.height : c.width;
-    const newH = isPortrait ? c.width : c.height;
+    const isPortrait = orientation === 'portrait';
+    const nextOrientation: 'portrait' | 'landscape' = isPortrait ? 'landscape' : 'portrait';
+    const nextSize = resolvePageSize(layoutPreset, nextOrientation, customSize);
+    const newW = nextSize.w;
+    const newH = nextSize.h;
     c.setWidth(newW);
     c.setHeight(newH);
     c.renderAll();
-    setOrientation(isPortrait ? 'landscape' : 'portrait');
+    setOrientation(nextOrientation);
+    if (layoutPreset === 'custom') {
+      setCustomSize({ w: newW, h: newH });
+    }
     setPages(prev => prev.map(p => ({ ...p, width: newW, height: newH })));
+    pagesRef.current = pagesRef.current.map(p => ({ ...p, width: newW, height: newH }));
+    requestAnimationFrame(() => runPagination());
     saveState();
-  }, [saveState]);
+  }, [saveState, orientation, layoutPreset, customSize]);
 
   useEffect(() => {
     const canvasEl = canvasRef.current;
     if (!canvasEl) return;
     const c = new fabric.Canvas(canvasEl, {
-      width: PAGE_SIZES['a4-portrait'].w,
-      height: PAGE_SIZES['a4-portrait'].h,
-      backgroundColor: '#ffffff',
+      width: currentPageSize.w,
+      height: currentPageSize.h,
+      backgroundColor: pageBackgroundColor,
       preserveObjectStacking: true,
       selection: true,
       defaultCursor: 'default',
@@ -1147,7 +1305,7 @@ const Editor: React.FC<EditorProps> = ({ docName, setDocName }) => {
       c.dispose();
       canvasInstance.current = null;
     };
-  }, [checkCanvasEmpty, initDocument, saveState, updateSelection]);
+  }, [checkCanvasEmpty, initDocument, saveState, updateSelection, currentPageSize.w, currentPageSize.h]);
 
   useEffect(() => {
     const handler = (e: BeforeUnloadEvent) => {
@@ -1159,6 +1317,32 @@ const Editor: React.FC<EditorProps> = ({ docName, setDocName }) => {
     window.addEventListener('beforeunload', handler);
     return () => window.removeEventListener('beforeunload', handler);
   }, []);
+
+  useEffect(() => {
+    window.history.pushState({ page: 'editor' }, '', window.location.href);
+    const handler = () => {
+      window.history.pushState({ page: 'editor' }, '', window.location.href);
+      if (hasUnsavedChangesRef.current) {
+        pendingActionRef.current = () => window.location.reload();
+        setShowUnsavedModal(true);
+      }
+    };
+    window.addEventListener('popstate', handler);
+    return () => window.removeEventListener('popstate', handler);
+  }, []);
+
+  useEffect(() => {
+    const savedName = localStorage.getItem('worddoc-last-saved-name');
+    if (savedName) {
+      setDocName(savedName);
+      safeSetStorageItem('worddoc-docname', savedName);
+    }
+    const restoreData = localStorage.getItem('worddoc-restore-data');
+    if (restoreData) {
+      localStorage.removeItem('worddoc-restore-data');
+      localStorage.setItem('worddoc-pending-restore', restoreData);
+    }
+  }, [setDocName]);
 
   useEffect(() => {
     if (!canvasInstance.current) return;
@@ -1191,6 +1375,7 @@ const Editor: React.FC<EditorProps> = ({ docName, setDocName }) => {
         pages: updatedPages, activePageIndex,
         headerContent, footerContent, headerEnabled, footerEnabled, differentFirstPage,
         comments, columns, orientation, pageBackgroundColor,
+        layoutPreset, marginPreset, customSize, pageMargins, pageLayoutUnit, lineNumbersMode, hyphenationMode,
         metadata: { pageCount: updatedPages.length, autoSaved: true },
       };
       try {
@@ -1283,27 +1468,6 @@ const Editor: React.FC<EditorProps> = ({ docName, setDocName }) => {
     document.addEventListener('selectionchange', syncSelection);
     return () => document.removeEventListener('selectionchange', syncSelection);
   }, []);
-
-  useEffect(() => {
-    if (!showQATExport) return;
-    setExportFocusIndex(0);
-    const timer = setTimeout(() => exportDropdownRef.current?.focus(), 50);
-    const handler = (e: MouseEvent) => {
-      if (qatExportRef.current && !qatExportRef.current.contains(e.target as Node)) {
-        setShowQATExport(false);
-      }
-    };
-    const escapeHandler = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setShowQATExport(false);
-    };
-    document.addEventListener('mousedown', handler);
-    document.addEventListener('keydown', escapeHandler);
-    return () => {
-      clearTimeout(timer);
-      document.removeEventListener('mousedown', handler);
-      document.removeEventListener('keydown', escapeHandler);
-    };
-  }, [showQATExport]);
 
   const handleZoom = useCallback((dir: string) => {
     if (!canvasInstance.current) return;
@@ -1659,6 +1823,30 @@ const Editor: React.FC<EditorProps> = ({ docName, setDocName }) => {
     execInEditor(dir === 'in' ? 'indent' : 'outdent');
   }, []);
 
+  const handleParagraphSpacing = useCallback((before: number, after: number) => {
+    const editor = document.querySelector('[data-page-editor="true"]') as HTMLElement | null;
+    if (editor && document.activeElement === editor) {
+      const selection = window.getSelection();
+      const block = selection?.anchorNode ? (selection.anchorNode.nodeType === Node.ELEMENT_NODE
+        ? selection.anchorNode as HTMLElement
+        : selection.anchorNode.parentElement) : null;
+      const target = block?.closest('p,div,li,blockquote,h1,h2,h3,h4,h5,h6') as HTMLElement | null;
+      if (target) {
+        target.style.marginTop = `${before}px`;
+        target.style.marginBottom = `${after}px`;
+        editor.dispatchEvent(new Event('input', { bubbles: true }));
+        saveState();
+        return;
+      }
+    }
+    const active = canvasInstance.current?.getActiveObject() as any;
+    if (active && (active.type === 'i-text' || active.type === 'itext')) {
+      active.set('lineHeight', Math.max(0.5, (active.lineHeight || 1.15)));
+      canvasInstance.current?.renderAll();
+      saveState();
+    }
+  }, [saveState]);
+
   const handleApplyListType = useCallback((type: 'none' | 'bullet' | 'number' | 'multi-level') => {
     if (type === 'bullet') execInEditor('insertUnorderedList');
     else if (type === 'number') execInEditor('insertOrderedList');
@@ -1813,30 +2001,38 @@ const Editor: React.FC<EditorProps> = ({ docName, setDocName }) => {
     if (!c) return;
     const active = c.getActiveObject();
     if (!active) return;
-    c.discardActiveObject();
-    c.renderAll();
-    const dataUrl = c.toDataURL({ multiplier: 2 });
-    if (active) c.setActiveObject(active);
-    c.renderAll();
-    fetch(dataUrl)
-      .then(res => res.blob())
-      .then(async blob => {
-        try {
-          if ('clipboard' in navigator && 'ClipboardItem' in window) {
-            await navigator.clipboard.write([new ClipboardItem({ [blob.type]: blob })]);
-          } else {
-            const link = document.createElement('a');
-            link.download = 'selection.png';
-            link.href = dataUrl;
-            link.click();
-          }
-        } catch {
+    const bounds = active.getBoundingRect();
+    const padding = 10;
+    const tmpCanvas = document.createElement('canvas');
+    tmpCanvas.width = (bounds.width + padding * 2) * 2;
+    tmpCanvas.height = (bounds.height + padding * 2) * 2;
+    const tmpFabric = new fabric.StaticCanvas(tmpCanvas, { backgroundColor: 'transparent' });
+    active.clone((cloned: any) => {
+      cloned.set({
+        left: padding * 2 + (bounds.width / 2 - (cloned.width * cloned.scaleX) / 2),
+        top: padding * 2 + (bounds.height / 2 - (cloned.height * cloned.scaleY) / 2),
+      });
+      tmpFabric.add(cloned);
+      tmpFabric.renderAll();
+      const dataUrl = tmpFabric.toDataURL({ multiplier: 1, format: 'png' });
+      tmpFabric.dispose();
+      const mimeType = 'image/png';
+      fetch(dataUrl)
+        .then(res => res.blob())
+        .then(async (blob) => {
+          const pngBlob = blob.type === mimeType ? blob : new Blob([blob], { type: mimeType });
+          try {
+            if (typeof ClipboardItem !== 'undefined') {
+              await navigator.clipboard.write([new ClipboardItem({ [mimeType]: pngBlob })]);
+              return;
+            }
+          } catch { /* fallback below */ }
           const link = document.createElement('a');
           link.download = 'selection.png';
           link.href = dataUrl;
           link.click();
-        }
-      });
+        });
+    });
   }, []);
 
   const handleBorderColor = useCallback((color: string) => {
@@ -1957,6 +2153,82 @@ const Editor: React.FC<EditorProps> = ({ docName, setDocName }) => {
     c.renderAll();
   }, []);
 
+  const handleCropToShape = useCallback((shape: string) => {
+    const c = canvasInstance.current;
+    if (!c) return;
+    const active = c.getActiveObject();
+    if (!active || active.type !== 'image') return;
+    const img = active as any;
+    const w = img.width;
+    const h = img.height;
+    const cx = w / 2;
+    const cy = h / 2;
+    const r = Math.min(w, h) / 2;
+    let clipPath: any;
+    switch (shape) {
+      case 'circle':
+        clipPath = new fabric.Circle({ radius: r, originX: 'center', originY: 'center', left: cx, top: cy });
+        break;
+      case 'rounded-rect':
+        clipPath = new fabric.Rect({ width: w, height: h, rx: 20, ry: 20, originX: 'center', originY: 'center', left: cx, top: cy });
+        break;
+      case 'triangle':
+        clipPath = new fabric.Triangle({ width: w, height: h, originX: 'center', originY: 'center', left: cx, top: cy });
+        break;
+      case 'diamond':
+        clipPath = new fabric.Polygon([
+          { x: cx, y: 0 }, { x: w, y: cy }, { x: cx, y: h }, { x: 0, y: cy },
+        ], { originX: 'center', originY: 'center', left: cx, top: cy });
+        break;
+      case 'star': {
+        const points: { x: number; y: number }[] = [];
+        const outerR = r;
+        const innerR = r * 0.4;
+        for (let i = 0; i < 5; i++) {
+          const outerAngle = (i * 72 - 90) * Math.PI / 180;
+          const innerAngle = ((i * 72) + 36 - 90) * Math.PI / 180;
+          points.push({ x: cx + outerR * Math.cos(outerAngle), y: cy + outerR * Math.sin(outerAngle) });
+          points.push({ x: cx + innerR * Math.cos(innerAngle), y: cy + innerR * Math.sin(innerAngle) });
+        }
+        clipPath = new fabric.Polygon(points, { originX: 'center', originY: 'center', left: cx, top: cy });
+        break;
+      }
+      case 'hexagon': {
+        const pts: { x: number; y: number }[] = [];
+        for (let i = 0; i < 6; i++) {
+          const angle = (i * 60 - 30) * Math.PI / 180;
+          pts.push({ x: cx + r * Math.cos(angle), y: cy + r * Math.sin(angle) });
+        }
+        clipPath = new fabric.Polygon(pts, { originX: 'center', originY: 'center', left: cx, top: cy });
+        break;
+      }
+      default:
+        clipPath = new fabric.Rect({ width: w, height: h, originX: 'center', originY: 'center', left: cx, top: cy });
+    }
+    if (clipPath) {
+      clipPath.set({ selectable: false, evented: false });
+      img.set('clipPath', clipPath);
+      img.set('cropShape', shape);
+      c.renderAll();
+      saveState();
+    }
+  }, [saveState]);
+
+  const handleLockPosition = useCallback(() => {
+    const active = canvasInstance.current?.getActiveObject() as any;
+    if (!active) return;
+    const isLocked = active.lockMovementX && active.lockMovementY;
+    active.set({
+      lockMovementX: !isLocked,
+      lockMovementY: !isLocked,
+      lockRotation: !isLocked,
+      lockScalingX: !isLocked,
+      lockScalingY: !isLocked,
+    });
+    canvasInstance.current?.renderAll();
+    saveState();
+  }, [saveState]);
+
   const handleCropRatio = useCallback((ratio: string) => {
     const c = canvasInstance.current;
     if (!c || !cropRectRef.current) return;
@@ -2014,97 +2286,119 @@ const Editor: React.FC<EditorProps> = ({ docName, setDocName }) => {
     saveState();
   }, [saveState]);
 
-  const handleExport = useCallback((format: string) => {
+  const handleExport = useCallback(async (format: string) => {
     runPagination();
     const c = canvasInstance.current;
-    if (!c || !pagesRef.current.length) return;
+    const pages = pagesRef.current;
+    if (!c || !pages.length) return;
+
     const active = c.getActiveObject();
     if (active) c.discardActiveObject();
     c.renderAll();
+    await ExportManager.waitForFonts();
+
     const currentIdx = activePageIndex;
     const currentJson = JSON.stringify(c.toJSON(['name', 'link', 'cornerRadius']));
     const thumb = generateThumbnail();
-    const updatedPages = pagesRef.current.map((p, i) =>
+    const updatedPages = pages.map((p, i) =>
       i === currentIdx ? { ...p, objects: currentJson, thumbnail: thumb, content: pageTextSegmentsRef.current[i] || '' } : p
     );
-    getAllPageData(updatedPages).then((pageDataList) => {
-      if (format === 'pdf') {
-        const blob = generatePdfBlob(pageDataList);
-        downloadBlob(blob, `${docName}.pdf`);
-      } else if (format === 'docx') {
-        const content = generateDocxContent(updatedPages, pageDataList);
+
+    try {
+      if (format === 'docx') {
+        const content = ExportManager.generateDocxContent(updatedPages, docName);
         const blob = new Blob([content], { type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' });
-        downloadBlob(blob, `${docName}.docx`);
-      } else if (format === 'png') {
-        const dataUrl = c.toDataURL({ format: 'png', multiplier: 2 });
-        const link = document.createElement('a');
-        link.download = `${docName}.png`;
-        link.href = dataUrl;
-        link.click();
-      } else if (format === 'jpg') {
-        const dataUrl = c.toDataURL({ format: 'jpeg', multiplier: 2 });
-        const link = document.createElement('a');
-        link.download = `${docName}.jpg`;
-        link.href = dataUrl;
-        link.click();
-      } else if (format === 'svg') {
-        const svg = c.toSVG();
-        const blob = new Blob([svg], { type: 'image/svg+xml' });
-        downloadBlob(blob, `${docName}.svg`);
+        ExportManager.downloadBlob(blob, `${docName}.docx`, () => { setShowSuccess(true); setTimeout(() => setShowSuccess(false), 2000); });
+        return;
       }
-    });
-    if (active) c.setActiveObject(active);
-    c.renderAll();
-  }, [activePageIndex, generateThumbnail, docName]);
+
+      const pageSnapshots = await getAllPageData(updatedPages);
+
+      if (format === 'pdf') {
+        const rasterPromises = updatedPages.map(async (page, i) => {
+          const snapshot = pageSnapshots[i];
+          const svg = ExportManager.buildCompositePageSvg(page, snapshot?.dataUrl);
+          const pngDataUrl = await ExportManager.rasterizeSvgWithFallback(svg, 'image/png', () => c);
+          return { dataUrl: pngDataUrl, width: page.width, height: page.height };
+        });
+        const compositePages = await Promise.all(rasterPromises);
+        const blob = ExportManager.generatePdfBlob(compositePages);
+        ExportManager.downloadBlob(blob, `${docName}.pdf`, () => { setShowSuccess(true); setTimeout(() => setShowSuccess(false), 2000); });
+        return;
+      }
+
+      const currentPage = updatedPages[currentIdx];
+      const currentSnapshot = pageSnapshots[currentIdx];
+      const compositeSvg = ExportManager.buildCompositePageSvg(currentPage, currentSnapshot?.dataUrl);
+
+      if (format === 'svg') {
+        ExportManager.validateSvg(compositeSvg);
+        const blob = new Blob([compositeSvg], { type: 'image/svg+xml' });
+        ExportManager.downloadBlob(blob, `${docName}.svg`, () => { setShowSuccess(true); setTimeout(() => setShowSuccess(false), 2000); });
+        return;
+      }
+
+      const mimeType = format === 'jpg' ? 'image/jpeg' : 'image/png';
+      const dataUrl = await ExportManager.rasterizeSvgWithFallback(compositeSvg, mimeType, () => c);
+      const link = document.createElement('a');
+      link.download = `${docName}.${format === 'jpg' ? 'jpg' : 'png'}`;
+      link.href = dataUrl;
+      link.click();
+      setShowSuccess(true);
+      setTimeout(() => setShowSuccess(false), 2000);
+    } catch (err) {
+      console.error('Export failed:', err);
+      setErrorMessage('Export failed: ' + (err instanceof Error ? err.message : 'Unknown error'));
+      setShowError(true);
+      setTimeout(() => setShowError(false), 4000);
+    } finally {
+      if (active) c.setActiveObject(active);
+      c.renderAll();
+    }
+  }, [activePageIndex, generateThumbnail, docName, runPagination]);
 
   const getAllPageData = useCallback(async (pagesData: PageData[]): Promise<Array<{ dataUrl: string; width: number; height: number }>> => {
     const results: Array<{ dataUrl: string; width: number; height: number }> = [];
-    for (const page of pagesData) {
-      const c = canvasInstance.current;
-      if (c) {
-        c.loadFromJSON(JSON.parse(page.objects), () => {
-          c.renderAll();
-          const dataUrl = c.toDataURL({ multiplier: 2 });
-          results.push({ dataUrl, width: c.width, height: c.height });
-        });
-        await new Promise(r => setTimeout(r, 100));
-      }
-    }
-    if (canvasInstance.current) {
-      const c = canvasInstance.current;
-      c.loadFromJSON(JSON.parse(pagesData[activePageIndex]?.objects || '{}'), () => {
-        c.renderAll();
-        updateSelection();
+    const c = canvasInstance.current;
+    if (!c) return results;
+
+    const loadPage = (page: PageData): Promise<{ dataUrl: string; width: number; height: number }> => {
+      return new Promise((resolve) => {
+        try {
+          c.loadFromJSON(JSON.parse(page.objects || '{"version":"5.3.1","objects":[]}'), () => {
+            try {
+              c.renderAll();
+              const dataUrl = c.toDataURL({ multiplier: 2 });
+              resolve({ dataUrl, width: c.width, height: c.height });
+            } catch (innerErr) {
+              console.error('Error capturing page data:', innerErr);
+              resolve({ dataUrl: '', width: c.width, height: c.height });
+            }
+          });
+        } catch (parseErr) {
+          console.error('Error parsing page objects:', parseErr);
+          resolve({ dataUrl: '', width: c.width, height: c.height });
+        }
       });
+    };
+
+    for (const page of pagesData) {
+      const result = await loadPage(page);
+      results.push(result);
     }
+
+    try {
+      await new Promise<void>((resolve) => {
+        c.loadFromJSON(JSON.parse(pagesData[activePageIndex]?.objects || '{"version":"5.3.1","objects":[]}'), () => {
+          c.renderAll();
+          updateSelection();
+          resolve();
+        });
+      });
+    } catch {}
+
     return results;
   }, [activePageIndex, updateSelection]);
-
-  const generateDocxContent = useCallback((pagesData: PageData[], pageDataList: Array<{ dataUrl: string; width: number; height: number }>): string => {
-    let html = '<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:w="urn:schemas-microsoft-com:office:word" xmlns="http://www.w3.org/TR/REC-html40"><head><meta charset="UTF-8"><title>' + docName + '</title></head><body>';
-    pagesData.forEach((page, i) => {
-      const content = page.content || '';
-      if (content) html += '<div style="page-break-after:always">' + content + '</div>';
-      if (pageDataList[i]) {
-        html += '<div style="page-break-after:always"><img src="' + pageDataList[i].dataUrl + '" style="width:100%"/></div>';
-      }
-    });
-    html += '</body></html>';
-    return html;
-  }, [docName]);
-
-  const downloadBlob = useCallback((blob: Blob, filename: string) => {
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = filename;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    URL.revokeObjectURL(url);
-    setShowSuccess(true);
-    setTimeout(() => setShowSuccess(false), 2000);
-  }, []);
 
   const handleNewDocument = useCallback(() => {
     if (hasUnsavedChangesRef.current) {
@@ -2153,7 +2447,7 @@ const Editor: React.FC<EditorProps> = ({ docName, setDocName }) => {
     setTimeout(() => initDocument(), 50);
   }, [checkCanvasEmpty, initDocument]);
 
-  const handleOpenDocument = useCallback(() => {
+  const triggerOpenDocument = useCallback(() => {
     const input = document.createElement('input');
     input.type = 'file';
     input.accept = '.json';
@@ -2176,7 +2470,15 @@ const Editor: React.FC<EditorProps> = ({ docName, setDocName }) => {
             const pw = sourcePages[0]?.width || pageWidth;
             const ph = sourcePages[0]?.height || pageHeight;
             const nextColumns = typeof data.columns === 'number' && data.columns > 0 ? data.columns : columns;
-            const segments = paginateContent(fullHtml, pw, ph, nextColumns);
+            const nextLayoutPreset = typeof data.layoutPreset === 'string' ? data.layoutPreset : layoutPreset;
+            const nextOrientation = data.orientation === 'landscape' ? 'landscape' : 'portrait';
+            const nextMargins = data.pageMargins && typeof data.pageMargins === 'object'
+              ? { ...cloneMargins(DEFAULT_MARGIN_PRESETS.normal), ...data.pageMargins }
+              : cloneMargins(pageMargins);
+            const nextUnit: PageLayoutUnit = data.pageLayoutUnit === 'cm' ? 'cm' : 'in';
+            const nextHyphenation: HyphenationMode = data.hyphenationMode === 'automatic' || data.hyphenationMode === 'manual' ? data.hyphenationMode : hyphenationMode;
+            const nextLineNumbers: LineNumberMode = data.lineNumbersMode === 'continuous' || data.lineNumbersMode === 'restart-page' || data.lineNumbersMode === 'restart-section' ? data.lineNumbersMode : lineNumbersMode;
+            const segments = paginateContent(fullHtml, pw, ph, nextColumns, nextMargins, nextUnit, nextHyphenation);
             const normalizedPages: PageData[] = segments.map((segment, i) => {
               const source = sourcePages[i];
               return {
@@ -2196,11 +2498,21 @@ const Editor: React.FC<EditorProps> = ({ docName, setDocName }) => {
               pagesRef.current = normalizedPages;
               setActivePageIndex(activeIdx);
               setColumns(nextColumns);
+              setLayoutPreset(nextLayoutPreset as any);
+              setOrientation(nextOrientation);
+              setPageMargins(cloneMargins(nextMargins));
+              setPageLayoutUnit(nextUnit);
+              setLineNumbersMode(nextLineNumbers);
+              setHyphenationMode(nextHyphenation);
               fullDocumentHtmlRef.current = fullHtml;
               setFullDocumentHtml(fullHtml);
               pageTextSegmentsRef.current = segments;
               setPageTextSegments(segments);
               setDocName(loadedName);
+              if (typeof data.marginPreset === 'string') setMarginPreset(data.marginPreset as MarginPresetName);
+              if (data.customSize && typeof data.customSize.w === 'number' && typeof data.customSize.h === 'number') {
+                setCustomSize({ w: data.customSize.w, h: data.customSize.h });
+              }
               safeSetStorageItem('worddoc-docname', loadedName);
               hasUnsavedChangesRef.current = false;
               saveState();
@@ -2208,13 +2520,24 @@ const Editor: React.FC<EditorProps> = ({ docName, setDocName }) => {
             });
           }
         } catch {
-          alert('Could not open file. It may be corrupted or in an unsupported format.');
+          setErrorMessage('Could not open file. It may be corrupted or in an unsupported format.');
+          setShowError(true);
+          setTimeout(() => setShowError(false), 4000);
         }
       };
       reader.readAsText(file);
     };
     input.click();
-  }, [saveState, checkCanvasEmpty]);
+  }, [saveState, checkCanvasEmpty, columns, layoutPreset, orientation, pageMargins, pageLayoutUnit, hyphenationMode, lineNumbersMode, pageWidth, pageHeight, setDocName]);
+
+  const handleOpenDocument = useCallback(() => {
+    if (hasUnsavedChangesRef.current) {
+      pendingActionRef.current = () => triggerOpenDocument();
+      setShowUnsavedModal(true);
+    } else {
+      triggerOpenDocument();
+    }
+  }, [triggerOpenDocument]);
 
   const handleSaveDocument = useCallback(() => {
     runPagination();
@@ -2232,6 +2555,7 @@ const Editor: React.FC<EditorProps> = ({ docName, setDocName }) => {
       pages: updatedPages, activePageIndex: currentIdx,
       headerContent, footerContent, headerEnabled, footerEnabled, differentFirstPage,
       comments, columns, orientation, pageBackgroundColor,
+      layoutPreset, marginPreset, customSize, pageMargins, pageLayoutUnit, lineNumbersMode, hyphenationMode,
       metadata: { pageCount: updatedPages.length, savedAt: new Date().toISOString() },
     };
     const blob = new Blob([JSON.stringify(docData, null, 2)], { type: 'application/json' });
@@ -2244,7 +2568,7 @@ const Editor: React.FC<EditorProps> = ({ docName, setDocName }) => {
     hasUnsavedChangesRef.current = false;
     setShowSuccess(true);
     setTimeout(() => setShowSuccess(false), 2000);
-  }, [activePageIndex, docName, headerContent, footerContent, headerEnabled, footerEnabled, differentFirstPage, comments, columns, orientation, pageBackgroundColor]);
+  }, [activePageIndex, docName, headerContent, footerContent, headerEnabled, footerEnabled, differentFirstPage, comments, columns, orientation, pageBackgroundColor, layoutPreset, marginPreset, customSize, pageMargins, pageLayoutUnit, lineNumbersMode, hyphenationMode]);
 
   const handlePrint = useCallback(() => {
     const c = canvasInstance.current;
@@ -2297,24 +2621,16 @@ const Editor: React.FC<EditorProps> = ({ docName, setDocName }) => {
     saveState();
   }, [findText, replaceText, saveState]);
 
-  const handleSaveFormat = useCallback((format: string) => {
-    setSelectedFormat(format);
-    handleExport(format);
-  }, [handleExport]);
-
   const handleCut = useCallback(() => {
     const c = canvasInstance.current;
     const editor = document.querySelector('[data-page-editor="true"]') as HTMLElement | null;
     if (editor && document.activeElement === editor) {
-      execInEditor('cut');
+      document.execCommand('cut');
       return;
     }
     if (!c) return;
     const active = c.getActiveObject();
     if (!active) return;
-    if (active.type === 'i-text' || active.type === 'itext') {
-      execInEditor('cut'); return;
-    }
     active.clone((cloned: any) => { clipboardRef.current = cloned; });
     if (active.type === 'activeSelection') {
       (active as any).forEachObject((obj: any) => c.remove(obj));
@@ -2332,15 +2648,12 @@ const Editor: React.FC<EditorProps> = ({ docName, setDocName }) => {
     const c = canvasInstance.current;
     const editor = document.querySelector('[data-page-editor="true"]') as HTMLElement | null;
     if (editor && document.activeElement === editor) {
-      execInEditor('copy');
+      document.execCommand('copy');
       return;
     }
     if (!c) return;
     const active = c.getActiveObject();
     if (!active) return;
-    if (active.type === 'i-text' || active.type === 'itext') {
-      execInEditor('copy'); return;
-    }
     active.clone((cloned: any) => { clipboardRef.current = cloned; });
   }, []);
 
@@ -2351,15 +2664,30 @@ const Editor: React.FC<EditorProps> = ({ docName, setDocName }) => {
       document.execCommand('paste');
       return;
     }
-    if (!c || !clipboardRef.current) return;
-    clipboardRef.current.clone((cloned: any) => {
-      cloned.set({ left: (cloned.left || 50) + 20, top: (cloned.top || 50) + 20, evented: true, selectable: true });
-      c.add(cloned);
-      c.setActiveObject(cloned);
-      c.renderAll();
-      saveState();
-      checkCanvasEmpty();
-    });
+    if (!c) return;
+    if (clipboardRef.current) {
+      clipboardRef.current.clone((cloned: any) => {
+        cloned.set({ left: (cloned.left || 50) + 20, top: (cloned.top || 50) + 20, evented: true, selectable: true });
+        c.add(cloned);
+        c.setActiveObject(cloned);
+        c.renderAll();
+        saveState();
+        checkCanvasEmpty();
+      });
+      return;
+    }
+    navigator.clipboard.readText().then(text => {
+      if (text && c) {
+        const textbox = new fabric.IText(text, {
+          left: 50, top: 50, fontSize: 24, fontFamily: 'Calibri', fill: '#000000', selectable: true, evented: true
+        });
+        c.add(textbox);
+        c.setActiveObject(textbox);
+        c.renderAll();
+        saveState();
+        checkCanvasEmpty();
+      }
+    }).catch(() => {});
   }, [saveState, checkCanvasEmpty]);
 
   const handlePasteEvent = useCallback((e: ClipboardEvent) => {
@@ -2442,6 +2770,7 @@ const Editor: React.FC<EditorProps> = ({ docName, setDocName }) => {
 
   const handleTogglePageBorder = useCallback(() => {
     setShowPageBorder(prev => !prev);
+    hasUnsavedChangesRef.current = true;
   }, []);
 
   const handleToggleHeaderFooter = useCallback(() => {
@@ -2465,14 +2794,17 @@ const Editor: React.FC<EditorProps> = ({ docName, setDocName }) => {
     };
     setComments(prev => [...prev, newComment]);
     setCommentText('');
+    hasUnsavedChangesRef.current = true;
   }, [commentText]);
 
   const handleDeleteComment = useCallback((id: string) => {
     setComments(prev => prev.filter(c => c.id !== id));
+    hasUnsavedChangesRef.current = true;
   }, []);
 
   const handleResolveComment = useCallback((id: string) => {
     setComments(prev => prev.map(c => c.id === id ? { ...c, resolved: true } : c));
+    hasUnsavedChangesRef.current = true;
   }, []);
 
   const handleImageTransparency = useCallback((value: number) => {
@@ -2543,15 +2875,38 @@ const Editor: React.FC<EditorProps> = ({ docName, setDocName }) => {
   const handleSetLayout = useCallback((preset: string) => {
     if (!canvasInstance.current) return;
     const c = canvasInstance.current;
-    const size = PAGE_SIZES[preset];
-    if (!size) return;
+    const legacySizeMap: Record<string, { w: number; h: number; orientation?: 'portrait' | 'landscape'; preset?: 'a4' | 'a3' | 'letter' | 'legal' | 'executive' | 'tabloid' | 'custom' }> = {
+      'a4-portrait': { w: 794, h: 1123, orientation: 'portrait', preset: 'a4' },
+      'a4-landscape': { w: 1123, h: 794, orientation: 'landscape', preset: 'a4' },
+      'a3-portrait': { w: 1123, h: 1587, orientation: 'portrait', preset: 'a3' },
+      'a3-landscape': { w: 1587, h: 1123, orientation: 'landscape', preset: 'a3' },
+      square: { w: 800, h: 800, preset: 'custom' },
+      'instagram-post': { w: 1080, h: 1080, preset: 'custom' },
+      'instagram-story': { w: 1080, h: 1920, preset: 'custom' },
+      'facebook-post': { w: 1200, h: 630, preset: 'custom' },
+      'youtube-thumbnail': { w: 1280, h: 720, preset: 'custom' },
+    };
+    const legacy = legacySizeMap[preset];
+    const nextPreset = (['a4', 'a3', 'letter', 'legal', 'executive', 'tabloid', 'custom'].includes(preset) ? preset : legacy?.preset || 'a4') as 'a4' | 'a3' | 'letter' | 'legal' | 'executive' | 'tabloid' | 'custom';
+    const effectiveOrientation = legacy?.orientation || orientation;
+    const size = legacy
+      ? { w: legacy.w, h: legacy.h }
+      : nextPreset === 'custom'
+        ? resolvePageSize('custom', effectiveOrientation, customSize)
+        : resolvePageSize(nextPreset, effectiveOrientation, customSize);
     c.setWidth(size.w);
     c.setHeight(size.h);
     c.renderAll();
-    setLayoutPreset(preset);
+    setLayoutPreset(nextPreset);
+    if (legacy?.orientation) setOrientation(legacy.orientation);
     setPages(prev => prev.map(p => ({ ...p, width: size.w, height: size.h })));
+    pagesRef.current = pagesRef.current.map(p => ({ ...p, width: size.w, height: size.h }));
+    if (nextPreset !== 'custom') {
+      setCustomSize({ w: size.w, h: size.h });
+    }
+    requestAnimationFrame(() => runPagination());
     saveState();
-  }, [saveState]);
+  }, [saveState, orientation, customSize]);
 
   const handleSetCustomSize = useCallback((w: number, h: number) => {
     if (!canvasInstance.current) return;
@@ -2562,16 +2917,69 @@ const Editor: React.FC<EditorProps> = ({ docName, setDocName }) => {
     setCustomSize({ w, h });
     setLayoutPreset('custom');
     setPages(prev => prev.map(p => ({ ...p, width: w, height: h })));
+    pagesRef.current = pagesRef.current.map(p => ({ ...p, width: w, height: h }));
+    requestAnimationFrame(() => runPagination());
     saveState();
   }, [saveState]);
 
   const handleSetMargins = useCallback((preset: string) => {
-    const m = MARGIN_PRESETS[preset];
-    if (m) {
-      marginsRef.current = m;
-      setMarginPreset(preset);
+    const next = DEFAULT_MARGIN_PRESETS[preset as MarginPresetName];
+    if (next) {
+      setPageMargins(cloneMargins(next));
+      setMarginPreset(preset as MarginPresetName);
+      requestAnimationFrame(() => runPagination());
+      hasUnsavedChangesRef.current = true;
     }
+  }, [runPagination]);
+
+  const handleSetPageLayoutUnit = useCallback((unit: PageLayoutUnit) => {
+    setPageLayoutUnit(unit);
+    requestAnimationFrame(() => runPagination());
+    hasUnsavedChangesRef.current = true;
+  }, [runPagination]);
+
+  const handleSetLineNumbers = useCallback((mode: LineNumberMode) => {
+    setLineNumbersMode(mode);
+    requestAnimationFrame(() => runPagination());
+    hasUnsavedChangesRef.current = true;
+  }, [runPagination]);
+
+  const handleSetHyphenation = useCallback((mode: HyphenationMode) => {
+    setHyphenationMode(mode);
+    requestAnimationFrame(() => runPagination());
+    hasUnsavedChangesRef.current = true;
+  }, [runPagination]);
+
+  const handleOpenCustomMarginsDialog = useCallback(() => {
+    setShowCustomMarginsDialog(true);
   }, []);
+
+  const handleOpenCustomSizeDialog = useCallback(() => {
+    setShowCustomSizeDialog(true);
+  }, []);
+
+  const handleApplyCustomMargins = useCallback((nextMargins: PageMargins) => {
+    setPageMargins(cloneMargins(nextMargins));
+    setMarginPreset('normal');
+    setShowCustomMarginsDialog(false);
+    requestAnimationFrame(() => runPagination());
+    saveState();
+  }, [runPagination, saveState]);
+
+  const handleApplyCustomSize = useCallback((w: number, h: number) => {
+    if (!canvasInstance.current) return;
+    const c = canvasInstance.current;
+    c.setWidth(w);
+    c.setHeight(h);
+    c.renderAll();
+    setCustomSize({ w, h });
+    setLayoutPreset('custom');
+    setShowCustomSizeDialog(false);
+    setPages(prev => prev.map(p => ({ ...p, width: w, height: h })));
+    pagesRef.current = pagesRef.current.map(p => ({ ...p, width: w, height: h }));
+    requestAnimationFrame(() => runPagination());
+    saveState();
+  }, [runPagination, saveState]);
 
   const handleSetAspectRatio = useCallback((ratio: string) => {
     if (!canvasInstance.current) return;
@@ -2595,12 +3003,17 @@ const Editor: React.FC<EditorProps> = ({ docName, setDocName }) => {
 
   const handleSetPageBackground = useCallback((color: string) => {
     setPageBackgroundColor(color);
+    if (canvasInstance.current) {
+      canvasInstance.current.setBackgroundColor(color, () => canvasInstance.current.renderAll());
+    }
+    hasUnsavedChangesRef.current = true;
   }, []);
 
   const handleSetColumns = useCallback((n: number) => {
     const next = Math.max(1, Math.min(4, n));
     setColumns(next);
     requestAnimationFrame(() => runPagination());
+    hasUnsavedChangesRef.current = true;
   }, [runPagination]);
 
   const handleOpenLink = useCallback(() => {
@@ -2640,26 +3053,208 @@ const Editor: React.FC<EditorProps> = ({ docName, setDocName }) => {
     }
   }, [saveState]);
 
+  const handleToggleSelectionPane = useCallback(() => {
+    setShowSelectionPane(prev => !prev);
+  }, []);
+
+  const handleSelectSelectionPaneItem = useCallback((index: number) => {
+    const c = canvasInstance.current;
+    if (!c) return;
+    const obj = c.getObjects()[index];
+    if (!obj) return;
+    c.setActiveObject(obj);
+    c.renderAll();
+    updateSelection();
+    setShowSelectionPane(true);
+  }, [updateSelection]);
+
   const handleUnsavedCancel = useCallback(() => {
     setShowUnsavedModal(false);
     pendingActionRef.current = () => {};
   }, []);
 
   const handleUnsavedSave = useCallback(() => {
-    handleSaveDocument();
     setShowUnsavedModal(false);
-    const action = pendingActionRef.current;
-    pendingActionRef.current = () => {};
-    setTimeout(() => action(), 100);
-  }, [handleSaveDocument]);
+    setSaveDialogName(docName);
+    setSaveDialogFormat('pdf');
+    setShowSaveDialog(true);
+  }, [docName]);
 
-  const handleConfirmLeave = useCallback(() => {
-    setShowSaveFormat(false);
+  const handleUnsavedLeave = useCallback(() => {
+    setShowUnsavedModal(false);
     hasUnsavedChangesRef.current = false;
     const action = pendingActionRef.current;
     pendingActionRef.current = () => {};
     action();
   }, []);
+
+  const handleSaveDialogCancel = useCallback(() => {
+    setShowSaveDialog(false);
+    setExportLoading(false);
+    setExportSuccessFile('');
+    pendingActionRef.current = () => {};
+  }, []);
+
+  const handleSaveDialogSave = useCallback(async () => {
+    setExportLoading(true);
+    setExportSuccessFile('');
+    localStorage.setItem('worddoc-last-export-format', saveDialogFormat);
+    try {
+      const name = saveDialogName.trim() || 'Document1';
+      const ext = saveDialogFormat === 'pdf' ? 'pdf' : saveDialogFormat === 'docx' ? 'docx' : saveDialogFormat === 'svg' ? 'svg' : saveDialogFormat === 'json' ? 'json' : saveDialogFormat === 'jpg' ? 'jpg' : 'png';
+      const fullName = `${name}.${ext}`;
+      setDocName(name);
+      safeSetStorageItem('worddoc-docname', name);
+      localStorage.setItem('worddoc-last-saved-name', name);
+
+      await ExportManager.waitForFonts();
+      runPagination();
+
+      if (saveDialogFormat === 'json') {
+        if (!canvasInstance.current || !pagesRef.current.length) return;
+        const c = canvasInstance.current;
+        const currentIdx = activePageIndex;
+        const currentJson = JSON.stringify(c.toJSON(['name', 'link', 'cornerRadius']));
+        const segments = pageTextSegmentsRef.current;
+        const updatedPages = pagesRef.current.map((p, i) =>
+          i === currentIdx ? { ...p, objects: currentJson, content: segments[i] || '' } : { ...p, content: segments[i] || '' }
+        );
+        const docData = {
+          version: '1.0', title: name,
+          documentHtml: fullDocumentHtmlRef.current || '',
+          pages: updatedPages, activePageIndex: currentIdx,
+          headerContent, footerContent, headerEnabled, footerEnabled, differentFirstPage,
+          comments, columns, orientation, pageBackgroundColor,
+          layoutPreset, marginPreset, customSize, pageMargins, pageLayoutUnit, lineNumbersMode, hyphenationMode,
+          metadata: { pageCount: updatedPages.length, savedAt: new Date().toISOString() },
+        };
+        try { localStorage.setItem('worddoc-restore-data', JSON.stringify(docData)); } catch {}
+        const jsonStr = exportJsonPretty ? JSON.stringify(docData, null, 2) : JSON.stringify(docData);
+        const blob = new Blob([jsonStr], { type: 'application/json' });
+        await ExportManager.downloadBlob(blob, fullName);
+      } else if (saveDialogFormat === 'pdf') {
+        const c = canvasInstance.current;
+        const pages = pagesRef.current;
+        if (c && pages.length) {
+          const active = c.getActiveObject();
+          if (active) c.discardActiveObject();
+          c.renderAll();
+          const currentIdx = activePageIndex;
+          const currentJson = JSON.stringify(c.toJSON(['name', 'link', 'cornerRadius']));
+          const thumb = generateThumbnail();
+          const updatedPages = pages.map((p, i) =>
+            i === currentIdx ? { ...p, objects: currentJson, thumbnail: thumb, content: pageTextSegmentsRef.current[i] || '' } : p
+          );
+          const pageSnapshots = await getAllPageData(updatedPages);
+          const rasterPromises = updatedPages.map(async (page, i) => {
+            const snapshot = pageSnapshots[i];
+            const svg = ExportManager.buildCompositePageSvg(page, snapshot?.dataUrl);
+            const canvasFallback = () => canvasInstance.current;
+            const pngDataUrl = await ExportManager.rasterizeSvgWithFallback(svg, 'image/png', canvasFallback);
+            return { dataUrl: pngDataUrl, width: page.width, height: page.height };
+          });
+          const compositePages = await Promise.all(rasterPromises);
+          const blob = ExportManager.generatePdfBlob(compositePages);
+          if ('showDirectoryPicker' in window) {
+            try {
+              const handle = await (window as any).showSaveFilePicker({ suggestedName: fullName, types: [{ description: 'PDF', accept: { 'application/pdf': ['.pdf'] } }] });
+              const writable = await (handle as any).createWritable();
+              await (writable as any).write(blob);
+              await (writable as any).close();
+            } catch { ExportManager.downloadBlob(blob, fullName); }
+          } else { ExportManager.downloadBlob(blob, fullName); }
+        }
+      } else if (saveDialogFormat === 'docx') {
+        const pages = pagesRef.current;
+        if (pages.length) {
+          const content = ExportManager.generateDocxContent(pages, name);
+          const blob = new Blob([content], { type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' });
+          if ('showDirectoryPicker' in window) {
+            try {
+              const handle = await (window as any).showSaveFilePicker({ suggestedName: fullName, types: [{ description: 'Word Document', accept: { 'application/vnd.openxmlformats-officedocument.wordprocessingml.document': ['.docx'] } }] });
+              const writable = await (handle as any).createWritable();
+              await (writable as any).write(blob);
+              await (writable as any).close();
+            } catch { ExportManager.downloadBlob(blob, fullName); }
+          } else { ExportManager.downloadBlob(blob, fullName); }
+        }
+      } else if (saveDialogFormat === 'svg') {
+        const c = canvasInstance.current;
+        const pages = pagesRef.current;
+        if (c && pages.length) {
+          const currentIdx = activePageIndex;
+          const currentJson = JSON.stringify(c.toJSON(['name', 'link', 'cornerRadius']));
+          const updatedPages = pages.map((p, i) =>
+            i === currentIdx ? { ...p, objects: currentJson, content: pageTextSegmentsRef.current[i] || '' } : p
+          );
+          const pageSnapshots = await getAllPageData(updatedPages);
+          const currentPage = updatedPages[currentIdx];
+          const currentSnapshot = pageSnapshots[currentIdx];
+          const compositeSvg = ExportManager.buildCompositePageSvg(currentPage, currentSnapshot?.dataUrl);
+          ExportManager.validateSvg(compositeSvg);
+          const blob = new Blob([compositeSvg], { type: 'image/svg+xml' });
+          if ('showDirectoryPicker' in window) {
+            try {
+              const handle = await (window as any).showSaveFilePicker({ suggestedName: fullName, types: [{ description: 'SVG Image', accept: { 'image/svg+xml': ['.svg'] } }] });
+              const writable = await (handle as any).createWritable();
+              await (writable as any).write(blob);
+              await (writable as any).close();
+            } catch { ExportManager.downloadBlob(blob, fullName); }
+          } else { ExportManager.downloadBlob(blob, fullName); }
+        }
+      } else {
+        const mimeType = saveDialogFormat === 'jpg' ? 'image/jpeg' : 'image/png';
+        const c = canvasInstance.current;
+        const pages = pagesRef.current;
+        if (c && pages.length) {
+          const currentIdx = activePageIndex;
+          const currentJson = JSON.stringify(c.toJSON(['name', 'link', 'cornerRadius']));
+          const thumb = generateThumbnail();
+          const updatedPages = pages.map((p, i) =>
+            i === currentIdx ? { ...p, objects: currentJson, thumbnail: thumb, content: pageTextSegmentsRef.current[i] || '' } : p
+          );
+          const pageSnapshots = await getAllPageData(updatedPages);
+          const currentPage = updatedPages[currentIdx];
+          const currentSnapshot = pageSnapshots[currentIdx];
+          const compositeSvg = ExportManager.buildCompositePageSvg(currentPage, currentSnapshot?.dataUrl);
+          const canvasFallback = canvasInstance.current;
+          const dataUrl = await ExportManager.rasterizeSvgWithFallback(compositeSvg, mimeType, () => canvasFallback);
+          if ('showDirectoryPicker' in window) {
+            const response = await fetch(dataUrl);
+            const blob = await response.blob();
+            try {
+              const handle = await (window as any).showSaveFilePicker({ suggestedName: fullName, types: [{ description: saveDialogFormat === 'jpg' ? 'JPEG Image' : 'PNG Image', accept: { [mimeType]: [`.${saveDialogFormat}`] } }] });
+              const writable = await (handle as any).createWritable();
+              await (writable as any).write(blob);
+              await (writable as any).close();
+            } catch { ExportManager.downloadBlob(blob, fullName); }
+          } else {
+            const link = document.createElement('a');
+            link.download = fullName;
+            link.href = dataUrl;
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+          }
+        }
+      }
+
+      hasUnsavedChangesRef.current = false;
+      setExportLoading(false);
+      setExportSuccessFile(fullName);
+      setTimeout(() => { setShowSaveDialog(false); setExportSuccessFile(''); }, 1600);
+
+      const action = pendingActionRef.current;
+      pendingActionRef.current = () => {};
+      setTimeout(() => action(), 100);
+    } catch (err) {
+      setExportLoading(false);
+      console.error('Export failed:', err);
+      setErrorMessage('Export failed: ' + (err instanceof Error ? err.message : 'Unknown error'));
+      setShowError(true);
+      setTimeout(() => setShowError(false), 4000);
+    }
+  }, [saveDialogName, saveDialogFormat, docName, activePageIndex, generateThumbnail, runPagination, getAllPageData, headerContent, footerContent, headerEnabled, footerEnabled, differentFirstPage, comments, columns, orientation, pageBackgroundColor, layoutPreset, marginPreset, customSize, pageMargins, pageLayoutUnit, lineNumbersMode, hyphenationMode, exportJsonPretty]);
 
   const handleFeedback = useCallback(() => {
     setShowFeedbackDialog(true);
@@ -2840,6 +3435,16 @@ const Editor: React.FC<EditorProps> = ({ docName, setDocName }) => {
       e.preventDefault();
       handleCopy();
     }
+    if ((e.ctrlKey || e.metaKey) && e.key === 'x') {
+      if (isInput) return;
+      e.preventDefault();
+      handleCut();
+    }
+    if ((e.ctrlKey || e.metaKey) && e.key === 'v') {
+      if (isInput) return;
+      e.preventDefault();
+      handlePaste();
+    }
     if ((e.ctrlKey || e.metaKey) && e.key === 'a') {
       if (isInput) return;
       if (canvasInstance.current) {
@@ -2858,7 +3463,7 @@ const Editor: React.FC<EditorProps> = ({ docName, setDocName }) => {
       e.preventDefault();
       handleDuplicate();
     }
-  }, [handleDelete, handleCopy, undo, redo, handleDuplicate, isCropMode, handleCropCancel, handleNewDocument, handleOpenDocument, handleSaveDocument, handleFindReplace, handleExport, handleToggleRibbon, switchToPage, activePageIndex, pages.length, showGoToPage, handleZoom, handleZoomTo, focusMode]);
+  }, [handleDelete, handleCopy, handleCut, handlePaste, undo, redo, handleDuplicate, isCropMode, handleCropCancel, handleNewDocument, handleOpenDocument, handleSaveDocument, handleFindReplace, handleExport, handleToggleRibbon, switchToPage, activePageIndex, pages.length, showGoToPage, handleZoom, handleZoomTo, focusMode]);
 
   useEffect(() => {
     window.addEventListener('keydown', handleKeyDown);
@@ -2923,71 +3528,20 @@ const Editor: React.FC<EditorProps> = ({ docName, setDocName }) => {
   }, [handleZoom]);
 
   useEffect(() => {
-    if (!showUnsavedModal && !showSaveFormat) return;
+    if (!showUnsavedModal && !showSaveDialog) return;
     const handler = (e: KeyboardEvent) => {
       if (showUnsavedModal) {
         if (e.key === 'Escape') handleUnsavedCancel();
         if (e.key === 'Enter') handleUnsavedSave();
       }
-      if (showSaveFormat) {
-        if (e.key === 'Escape') setShowSaveFormat(false);
-        if (e.key === 'Enter') handleConfirmLeave();
+      if (showSaveDialog) {
+        if (e.key === 'Escape') handleSaveDialogCancel();
+        if (e.key === 'Enter') handleSaveDialogSave();
       }
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [showUnsavedModal, showSaveFormat, handleUnsavedCancel, handleUnsavedSave, handleConfirmLeave]);
-
-  const exportFormats = [
-    { key: 'pdf', icon: '<path d="M4 4h16a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z"></path><path d="M9 12h2l1-3 2 5 1-2h2"></path>', title: 'PDF Document', desc: 'Best for printing and sharing' },
-    { key: 'docx', icon: '<path d="M6 2h7l5 5v13a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2z"></path><polyline points="13 2 13 7 18 7"></polyline><line x1="9" y1="11" x2="15" y2="11"></line><line x1="9" y1="14" x2="14" y2="14"></line><line x1="9" y1="17" x2="12" y2="17"></line>', title: 'Word Document', desc: 'Editable Microsoft Word (.docx)' },
-    { key: 'png', icon: '<rect x="3" y="3" width="18" height="18" rx="2"></rect><circle cx="9" cy="8.5" r="1.5"></circle><path d="M3 16l5-5 3 3 4-4 6 6"></path>', title: 'PNG Image', desc: 'High-quality raster image' },
-    { key: 'jpg', icon: '<rect x="3" y="3" width="18" height="18" rx="2"></rect><circle cx="9.5" cy="8" r="1.5"></circle><path d="M3 15l4-4 3 3 5-5 6 6"></path>', title: 'JPEG Image', desc: 'Compressed raster image' },
-    { key: 'svg', icon: '<polyline points="15 18 21 12 15 6"></polyline><polyline points="9 6 3 12 9 18"></polyline>', title: 'SVG Vector', desc: 'Scalable vector graphic' },
-  ];
-
-  const handleExportKeydown = useCallback((e: React.KeyboardEvent<HTMLDivElement>) => {
-    if (!exportFormats.length) return;
-
-    if (e.key === 'ArrowDown') {
-      e.preventDefault();
-      setExportFocusIndex(prev => (prev + 1) % exportFormats.length);
-      return;
-    }
-
-    if (e.key === 'ArrowUp') {
-      e.preventDefault();
-      setExportFocusIndex(prev => (prev - 1 + exportFormats.length) % exportFormats.length);
-      return;
-    }
-
-    if (e.key === 'Home') {
-      e.preventDefault();
-      setExportFocusIndex(0);
-      return;
-    }
-
-    if (e.key === 'End') {
-      e.preventDefault();
-      setExportFocusIndex(exportFormats.length - 1);
-      return;
-    }
-
-    if (e.key === 'Enter' || e.key === ' ') {
-      e.preventDefault();
-      const item = exportFormats[exportFocusIndex];
-      if (item) {
-        handleExport(item.key);
-        setShowQATExport(false);
-      }
-      return;
-    }
-
-    if (e.key === 'Escape') {
-      e.preventDefault();
-      setShowQATExport(false);
-    }
-  }, [exportFocusIndex, handleExport]);
+  }, [showUnsavedModal, showSaveDialog, handleUnsavedCancel, handleUnsavedSave, handleSaveDialogCancel, handleSaveDialogSave]);
 
   const handleFileChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
@@ -3148,10 +3702,12 @@ const Editor: React.FC<EditorProps> = ({ docName, setDocName }) => {
 
   const handleApplyHeader = useCallback((text: string) => {
     setHeaderContent(text);
+    hasUnsavedChangesRef.current = true;
   }, []);
 
   const handleApplyFooter = useCallback((text: string) => {
     setFooterContent(text);
+    hasUnsavedChangesRef.current = true;
   }, []);
 
   const handleToggleAutoSave = useCallback(() => {
@@ -3160,14 +3716,6 @@ const Editor: React.FC<EditorProps> = ({ docName, setDocName }) => {
       safeSetStorageItem('worddoc-autosave', next ? 'true' : 'false');
       return next;
     });
-  }, []);
-
-  const handleUnsavedLeave = useCallback(() => {
-    setShowUnsavedModal(false);
-    hasUnsavedChangesRef.current = false;
-    const action = pendingActionRef.current;
-    pendingActionRef.current = () => {};
-    action();
   }, []);
 
   const contextMenuItems = useMemo<ContextMenuAction[]>(() => {
@@ -3179,95 +3727,195 @@ const Editor: React.FC<EditorProps> = ({ docName, setDocName }) => {
     const isMultiMode = contextMenu?.kind === 'multi';
     const isGroupMode = contextMenu?.kind === 'group';
     const hasLink = !!active?.link?.url;
+    const activeObj = c?.getActiveObject() as any;
+    const isLocked = activeObj?.lockUniScaling;
+    const isPosLocked = activeObj?.lockMovementX && activeObj?.lockMovementY;
+
+    const I = {
+      undo: 'M3 7v6h6M3 13a9 9 0 1 0 3-7.7',
+      redo: 'M21 7v6h-6M21 13a9 9 0 0 0-3-7.7',
+      cut: 'M23 6l-9.5 9.5M23 18l-9.5-9.5M6 6a3 3 0 1 1 0 6 3 3 0 0 1 0-6z M6 12a3 3 0 1 0 0 6 3 3 0 0 0 0-6z',
+      copy: 'M8 4h12a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z M16 20v2a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V10a2 2 0 0 1 2-2h2',
+      paste: 'M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2 M8.5 7a4 4 0 1 0 0-8 4 4 0 0 0 0 8z M17 8l5 5-5 5 M22 13H12',
+      pasteSpecial: 'M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2 M8.5 7a4 4 0 1 0 0-8 4 4 0 0 0 0 8z M14 12l3 3-3 3 M17 12l-3 3 3 3',
+      copyFormatting: 'M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2 M9 5a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v0a2 2 0 0 1-2 2h-2a2 2 0 0 1-2-2v0z',
+      font: 'M4 20h16M10 4l-6 16M14 4l6 16M9 12h6',
+      paragraph: 'M4 6h16M4 10h10M4 14h16M4 18h10',
+      bullets: 'M4 6h.01M4 12h.01M4 18h.01M8 6h12M8 12h12M8 18h12',
+      numbering: 'M8 6h12M8 12h12M8 18h12M4 6l1-1v4M4 18l1-1h-1M4 12h1v2l-1 1',
+      bold: 'M6 4h8a4 4 0 0 1 4 4 4 4 0 0 1-4 4H6z M6 12h9a4 4 0 0 1 4 4 4 4 0 0 1-4 4H6z',
+      italic: 'M19 4h-9M14 20H5M15 4l-6 16',
+      underline: 'M6 4v10a6 6 0 0 0 12 0V4M4 20h16',
+      strikethrough: 'M6 12h12M16 6a4 4 0 0 0-8 0v5a4 4 0 0 0 8 0',
+      textColor: 'M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5',
+      highlight: 'M9 11l3 3L22 4l-3-3-10 10z M21 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h6',
+      hyperlink: 'M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71',
+      comment: 'M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z',
+      find: 'M10 2a8 8 0 1 0 0 16 8 8 0 0 0 0-16z M21 21l-6-6',
+      replace: 'M16 5l3 3-3 3 M19 8H3 M8 19l-3-3 3-3 M5 16h16',
+      delete: 'M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2',
+      selectAll: 'M3 3h18v18H3z M7 7h10v10H7z',
+      replaceImage: 'M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12',
+      crop: 'M6 2v4M2 6h4M18 2v4M22 6h-4M6 18H2v4M6 22v-4M18 18h4v4M18 22v-4M2 12h20M12 2v20',
+      cropShape: 'M12 2l2.4 7.2H22l-6 4.8 2.4 7.2L12 16l-6.4 5.2L8 14l-6-4.8h7.6z',
+      rotateCCW: 'M1 12a11 11 0 1 1 0 0h20M1 12l4-4m-4 4 4 4',
+      rotateCW: 'M23 12a11 11 0 1 0 0 0H3m20 0l-4-4m4 4-4 4',
+      flipH: 'M3 12h18M3 12l4-4m-4 4 4 4M21 12l-4-4m4 4-4 4M12 3v18',
+      flipV: 'M12 3v18M12 3l-4 4m4-4 4 4M12 21l-4-4m4 4 4-4M3 12h18',
+      lock: 'M8 11V7a4 4 0 1 1 8 0v4 M4 11h16v10a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z',
+      lockOpen: 'M8 11V7a4 4 0 1 1 8 0v4 M4 11h16v10a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z M12 15v4',
+      bringForward: 'M12 5v14M5 12l7-7 7 7',
+      sendBackward: 'M12 19V5M5 12l7 7 7-7',
+      bringToFront: 'M12 2v20M5 9l7-7 7 7',
+      sendToBack: 'M12 22V2M5 15l7 7 7-7',
+      arrange: 'M12 2v4M12 22v-4M5 12h4M15 12h4M5 8l3-3-3-3M19 16l-3 3 3 3',
+      duplicate: 'M8 16H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v2M16 8h2a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-8a2 2 0 0 1-2-2v-2',
+      saveImageAs: 'M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3',
+      group: 'M8 3H5a2 2 0 0 0-2 2v3M18 3h3a2 2 0 0 1 2 2v3M8 21H5a2 2 0 0 1-2-2v-3M18 21h3a2 2 0 0 0 2-2v-3',
+      ungroup: 'M8 3H5a2 2 0 0 0-2 2v3M18 3h3a2 2 0 0 1 2 2v3M8 21H5a2 2 0 0 1-2-2v-3M18 21h3a2 2 0 0 0 2-2v-3 M12 3v6M12 15v6',
+      alignLeft: 'M4 6h12M4 12h16M4 18h10',
+      alignCenter: 'M8 6h8M4 12h16M6 18h12',
+      alignRight: 'M8 6h12M4 12h16M6 18h10',
+      distH: 'M4 6v12M20 6v12M12 3v18',
+      distV: 'M6 4h12M6 20h12M3 12h18',
+      image: 'M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z',
+      shape: 'M12 2l10 7-10 7L2 9z M12 16l10-7v7l-10 7-10-7v-7z',
+      addPage: 'M12 5v14M5 12h14',
+      pageBreak: 'M4 12h16M8 6v4M16 6v4M8 14v4M16 14v4',
+      insertText: 'M11 4H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-5 M11 4l-3 9M11 4l3 9M14 10H8',
+      header: 'M4 4h16v4H4z M4 16h16v4H4z M4 12h16',
+      footer: 'M4 4h16v4H4z M4 16h16v4H4z M12 8v8',
+      pageNumber: 'M4 4h16v16H4z M4 12h16M12 4v16',
+      docProps: 'M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z M14 2v6h6 M16 13H8M16 17H8M10 9H8',
+      fill: 'M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5',
+      outline: 'M12 2L2 7l10 5 10-5-10-5z M2 12l10 5 10-5 M2 17l10 5 10-5',
+      outlineWidth: 'M3 6h18M7 12h10M5 18h14',
+      shadow: 'M2 12h20M12 2v20M6 6l12 12M18 6L6 18',
+      rotate: 'M12 2v4M12 22v-4M2 12h4M18 12h4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83',
+      compress: 'M8 8v8M16 8v8M4 12h16M3 3l18 18',
+      resetImage: 'M23 4v6h-6M1 20v-6h6M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15',
+      imageProperties: 'M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z M12 8v4M12 16h.01',
+      shapeRect: 'M3 5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z',
+      shapeRoundedRect: 'M6 3h12a3 3 0 0 1 3 3v12a3 3 0 0 1-3 3H6a3 3 0 0 1-3-3V6a3 3 0 0 1 3-3z',
+      shapeCircle: 'M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20z',
+      shapeTriangle: 'M12 2L2 22h20z',
+      shapeDiamond: 'M12 2L22 12 12 22 2 12z',
+      shapeStar: 'M12 2l2.4 7.2H22l-6 4.8 2.4 7.2L12 16l-6.4 5.2L8 14l-6-4.8h7.6z',
+      shapeHexagon: 'M12 2l8.5 4.9v9.8L12 22l-8.5-4.9V6.9z',
+    };
+
+    const cropShapeChildren: ContextMenuAction[] = [
+      { id: 'cropRect', label: 'Rectangle', icon: I.shapeRect, onClick: () => handleCropToShape('rect') },
+      { id: 'cropRounded', label: 'Rounded Rectangle', icon: I.shapeRoundedRect, onClick: () => handleCropToShape('rounded-rect') },
+      { id: 'cropCircle', label: 'Circle', icon: I.shapeCircle, onClick: () => handleCropToShape('circle') },
+      { id: 'cropTriangle', label: 'Triangle', icon: I.shapeTriangle, onClick: () => handleCropToShape('triangle') },
+      { id: 'cropDiamond', label: 'Diamond', icon: I.shapeDiamond, onClick: () => handleCropToShape('diamond') },
+      { id: 'cropStar', label: 'Star', icon: I.shapeStar, onClick: () => handleCropToShape('star') },
+      { id: 'cropHexagon', label: 'Hexagon', icon: I.shapeHexagon, onClick: () => handleCropToShape('hexagon') },
+    ];
+
+    const arrangeChildren: ContextMenuAction[] = [
+      { id: 'bringForward', label: 'Bring Forward', shortcut: 'Ctrl+[', icon: I.bringForward, onClick: handleBringForward },
+      { id: 'sendBackward', label: 'Send Backward', shortcut: 'Ctrl+]', icon: I.sendBackward, onClick: handleSendBackward },
+      { id: 'bringToFront', label: 'Bring To Front', icon: I.bringToFront, onClick: handleBringToFront },
+      { id: 'sendToBack', label: 'Send To Back', icon: I.sendToBack, onClick: handleSendToBack },
+    ];
 
     const textItems: ContextMenuAction[] = [
-      { id: 'undo', label: 'Undo', shortcut: 'Ctrl+Z', disabled: !canUndo, onClick: () => (isTextMode ? document.execCommand('undo') : undo()) },
-      { id: 'redo', label: 'Redo', shortcut: 'Ctrl+Y', disabled: !canRedo, onClick: () => (isTextMode ? document.execCommand('redo') : redo()) },
-      { id: 'cut', label: 'Cut', shortcut: 'Ctrl+X', onClick: handleCut },
-      { id: 'copy', label: 'Copy', shortcut: 'Ctrl+C', onClick: handleCopy },
-      { id: 'paste', label: 'Paste', shortcut: 'Ctrl+V', onClick: handlePaste },
-      { id: 'pasteSpecial', label: 'Paste Special', onClick: () => { void pasteSpecial(); } },
-      { id: 'copyFormatting', label: 'Copy Formatting', onClick: captureFormatting },
-      { id: 'font', label: 'Font...', onClick: promptFont },
-      { id: 'paragraph', label: 'Paragraph...', onClick: promptParagraph },
-      { id: 'bullets', label: 'Bullets', onClick: () => execInEditor('insertUnorderedList') },
-      { id: 'numbering', label: 'Numbering', onClick: () => execInEditor('insertOrderedList') },
-      { id: 'bold', label: 'Bold', shortcut: 'Ctrl+B', onClick: handleBold },
-      { id: 'italic', label: 'Italic', shortcut: 'Ctrl+I', onClick: handleItalic },
-      { id: 'underline', label: 'Underline', shortcut: 'Ctrl+U', onClick: handleUnderline },
-      { id: 'strikethrough', label: 'Strikethrough', onClick: handleStrikethrough },
-      { id: 'textColor', label: 'Text Color', onClick: promptTextColor },
-      { id: 'highlight', label: 'Highlight', onClick: promptHighlight },
-      { id: 'hyperlink', label: 'Hyperlink', onClick: handleOpenLink },
-      { id: 'editHyperlink', label: 'Edit Hyperlink', disabled: !hasLink, onClick: handleOpenLink },
-      { id: 'removeHyperlink', label: 'Remove Hyperlink', disabled: !hasLink, onClick: handleRemoveLink },
-      { id: 'comment', label: 'Comment', onClick: handleAddComment },
-      { id: 'delete', label: 'Delete', danger: true, onClick: () => { if (isTextMode) execInEditor('delete'); else handleDelete(); } },
-      { id: 'selectAll', label: 'Select All', shortcut: 'Ctrl+A', onClick: handleSelectAll },
+      { id: 'undo', label: 'Undo', shortcut: 'Ctrl+Z', icon: I.undo, disabled: !canUndo, onClick: () => (isTextMode ? document.execCommand('undo') : undo()) },
+      { id: 'redo', label: 'Redo', shortcut: 'Ctrl+Y', icon: I.redo, disabled: !canRedo, onClick: () => (isTextMode ? document.execCommand('redo') : redo()) },
+      { id: 'cut', label: 'Cut', shortcut: 'Ctrl+X', icon: I.cut, onClick: handleCut },
+      { id: 'copy', label: 'Copy', shortcut: 'Ctrl+C', icon: I.copy, onClick: handleCopy },
+      { id: 'paste', label: 'Paste', shortcut: 'Ctrl+V', icon: I.paste, onClick: handlePaste },
+      { id: 'pasteSpecial', label: 'Paste Special', icon: I.pasteSpecial, onClick: () => { void pasteSpecial(); } },
+      { id: 'copyFormatting', label: 'Copy Formatting', icon: I.copyFormatting, onClick: captureFormatting },
+      { id: 'font', label: 'Font...', icon: I.font, onClick: promptFont },
+      { id: 'paragraph', label: 'Paragraph...', icon: I.paragraph, onClick: promptParagraph },
+      { id: 'bullets', label: 'Bullets', icon: I.bullets, onClick: () => execInEditor('insertUnorderedList') },
+      { id: 'numbering', label: 'Numbering', icon: I.numbering, onClick: () => execInEditor('insertOrderedList') },
+      { id: 'bold', label: 'Bold', shortcut: 'Ctrl+B', icon: I.bold, onClick: handleBold },
+      { id: 'italic', label: 'Italic', shortcut: 'Ctrl+I', icon: I.italic, onClick: handleItalic },
+      { id: 'underline', label: 'Underline', shortcut: 'Ctrl+U', icon: I.underline, onClick: handleUnderline },
+      { id: 'strikethrough', label: 'Strikethrough', icon: I.strikethrough, onClick: handleStrikethrough },
+      { id: 'textColor', label: 'Text Color', icon: I.textColor, onClick: promptTextColor },
+      { id: 'highlight', label: 'Highlight', icon: I.highlight, onClick: promptHighlight },
+      { id: 'hyperlink', label: 'Hyperlink', icon: I.hyperlink, onClick: handleOpenLink },
+      { id: 'editHyperlink', label: 'Edit Hyperlink', icon: I.hyperlink, disabled: !hasLink, onClick: handleOpenLink },
+      { id: 'removeHyperlink', label: 'Remove Hyperlink', icon: I.hyperlink, disabled: !hasLink, onClick: handleRemoveLink },
+      { id: 'comment', label: 'Comment', icon: I.comment, onClick: handleAddComment },
+      { id: 'delete', label: 'Delete', icon: I.delete, danger: true, onClick: () => { if (isTextMode) execInEditor('delete'); else handleDelete(); } },
+      { id: 'selectAll', label: 'Select All', shortcut: 'Ctrl+A', icon: I.selectAll, onClick: handleSelectAll },
     ];
 
     const emptyItems: ContextMenuAction[] = [
-      { id: 'undo', label: 'Undo', shortcut: 'Ctrl+Z', disabled: !canUndo, onClick: undo },
-      { id: 'redo', label: 'Redo', shortcut: 'Ctrl+Y', disabled: !canRedo, onClick: redo },
-      { id: 'paste', label: 'Paste', shortcut: 'Ctrl+V', onClick: handlePaste },
-      { id: 'pasteSpecial', label: 'Paste Special', onClick: () => { void pasteSpecial(); } },
-      { id: 'newPage', label: 'New Page', onClick: addPage },
-      { id: 'pageBreak', label: 'Page Break', onClick: handlePageBreak },
-      { id: 'insertText', label: 'Insert Text', onClick: handleAddText },
-      { id: 'insertImage', label: 'Insert Image', onClick: handleUploadClick },
-      { id: 'insertShape', label: 'Insert Shape', onClick: () => handleAddShape('rect') },
-      { id: 'header', label: 'Header', onClick: handleToggleHeaderFooter },
-      { id: 'footer', label: 'Footer', onClick: handleToggleHeaderFooter },
-      { id: 'pageNumber', label: 'Page Number', onClick: handleInsertPageNumber },
-      { id: 'docProps', label: 'Document Properties', onClick: () => setShowPreferences(true) },
-      { id: 'selectAll', label: 'Select All', shortcut: 'Ctrl+A', onClick: handleSelectAll },
+      { id: 'undo', label: 'Undo', shortcut: 'Ctrl+Z', icon: I.undo, disabled: !canUndo, onClick: undo },
+      { id: 'redo', label: 'Redo', shortcut: 'Ctrl+Y', icon: I.redo, disabled: !canRedo, onClick: redo },
+      { id: 'paste', label: 'Paste', shortcut: 'Ctrl+V', icon: I.paste, onClick: handlePaste },
+      { id: 'pasteSpecial', label: 'Paste Special', icon: I.pasteSpecial, onClick: () => { void pasteSpecial(); } },
+      { id: 'newPage', label: 'New Page', icon: I.addPage, onClick: addPage },
+      { id: 'pageBreak', label: 'Page Break', icon: I.pageBreak, onClick: handlePageBreak },
+      { id: 'insertText', label: 'Insert Text', icon: I.insertText, onClick: handleAddText },
+      { id: 'insertImage', label: 'Insert Image', icon: I.image, onClick: handleUploadClick },
+      { id: 'insertShape', label: 'Insert Shape', icon: I.shape, onClick: () => handleAddShape('rect') },
+      { id: 'header', label: 'Header', icon: I.header, onClick: handleToggleHeaderFooter },
+      { id: 'footer', label: 'Footer', icon: I.footer, onClick: handleToggleHeaderFooter },
+      { id: 'pageNumber', label: 'Page Number', icon: I.pageNumber, onClick: handleInsertPageNumber },
+      { id: 'find', label: 'Find', shortcut: 'Ctrl+F', icon: I.find, onClick: handleFindReplace },
+      { id: 'replace', label: 'Replace', shortcut: 'Ctrl+H', icon: I.replace, onClick: () => { handleFindReplace(); setTimeout(() => setShowFindReplace(true), 50); } },
+      { id: 'docProps', label: 'Document Properties', icon: I.docProps, onClick: () => setShowPreferences(true) },
+      { id: 'selectAll', label: 'Select All', shortcut: 'Ctrl+A', icon: I.selectAll, onClick: handleSelectAll },
     ];
 
     const imageItems: ContextMenuAction[] = [
-      { id: 'replace', label: 'Replace Image', onClick: handleReplaceClick },
-      { id: 'crop', label: 'Crop', onClick: handleCrop },
-      { id: 'cropShape', label: 'Crop to Shape', onClick: handleCrop },
-      { id: 'rotateLeft', label: 'Rotate Left', onClick: () => { const obj = c?.getActiveObject(); if (obj) { obj.rotate(((obj.angle || 0) - 90 + 360) % 360); c?.renderAll(); saveState(); } } },
-      { id: 'rotateRight', label: 'Rotate Right', onClick: () => { const obj = c?.getActiveObject(); if (obj) { obj.rotate(((obj.angle || 0) + 90) % 360); c?.renderAll(); saveState(); } } },
-      { id: 'flipH', label: 'Flip Horizontal', onClick: handleFlipH },
-      { id: 'flipV', label: 'Flip Vertical', onClick: handleFlipV },
-      { id: 'lockAspect', label: 'Lock Aspect Ratio', onClick: () => { const obj = c?.getActiveObject() as any; if (!obj) return; obj.lockUniScaling = !obj.lockUniScaling; c?.renderAll(); saveState(); } },
-      { id: 'bringForward', label: 'Bring Forward', onClick: handleBringForward },
-      { id: 'sendBackward', label: 'Send Backward', onClick: handleSendBackward },
-      { id: 'bringToFront', label: 'Bring To Front', onClick: handleBringToFront },
-      { id: 'sendToBack', label: 'Send To Back', onClick: handleSendToBack },
-      { id: 'duplicate', label: 'Duplicate', onClick: handleDuplicate },
-      { id: 'delete', label: 'Delete', danger: true, onClick: handleDelete },
+      { id: 'replace', label: 'Replace Image', icon: I.replaceImage, onClick: handleReplaceClick },
+      { id: 'crop', label: 'Crop', icon: I.crop, onClick: handleCrop },
+      { id: 'cropShape', label: 'Crop to Shape', icon: I.cropShape, children: cropShapeChildren },
+      { id: 'rotateLeft', label: 'Rotate Left', shortcut: 'Alt+\u2190', icon: I.rotateCCW, onClick: () => { const obj = c?.getActiveObject(); if (obj) { obj.rotate(((obj.angle || 0) - 90 + 360) % 360); c?.renderAll(); saveState(); } } },
+      { id: 'rotateRight', label: 'Rotate Right', shortcut: 'Alt+\u2192', icon: I.rotateCW, onClick: () => { const obj = c?.getActiveObject(); if (obj) { obj.rotate(((obj.angle || 0) + 90) % 360); c?.renderAll(); saveState(); } } },
+      { id: 'flipH', label: 'Flip Horizontal', icon: I.flipH, onClick: handleFlipH },
+      { id: 'flipV', label: 'Flip Vertical', icon: I.flipV, onClick: handleFlipV },
+      { id: 'lockAspect', label: 'Lock Aspect Ratio', icon: isLocked ? I.lock : I.lockOpen, checked: !!isLocked, onClick: () => { const obj = c?.getActiveObject() as any; if (!obj) return; obj.lockUniScaling = !obj.lockUniScaling; c?.renderAll(); saveState(); } },
+      { id: 'compress', label: 'Compress Image', icon: I.compress, onClick: () => { /* compress placeholder - maintains compatibility */ } },
+      { id: 'resetPicture', label: 'Reset Picture', icon: I.resetImage, onClick: () => { const obj = c?.getActiveObject() as any; if (!obj || obj.type !== 'image') return; obj.set({ flipX: false, flipY: false, angle: 0, opacity: 1, clipPath: null, filters: [] }); obj.applyFilters(); c?.renderAll(); saveState(); } },
+      { id: 'imageProps', label: 'Image Properties', icon: I.imageProperties, onClick: () => { setShowPreferences(true); } },
+      { id: 'arrange', label: 'Arrange', icon: I.arrange, children: arrangeChildren },
+      { id: 'copy', label: 'Copy', shortcut: 'Ctrl+C', icon: I.copy, onClick: handleCopy },
+      { id: 'paste', label: 'Paste', shortcut: 'Ctrl+V', icon: I.paste, onClick: handlePaste },
+      { id: 'duplicate', label: 'Duplicate', shortcut: 'Ctrl+D', icon: I.duplicate, onClick: handleDuplicate },
+      { id: 'lockPos', label: 'Lock Position', icon: isPosLocked ? I.lock : I.lockOpen, checked: !!isPosLocked, onClick: handleLockPosition },
+      { id: 'saveImage', label: 'Save Image As...', icon: I.saveImageAs, onClick: () => { const obj = c?.getActiveObject() as any; if (!obj || obj.type !== 'image') return; const dataUrl = (obj as any).toDataURL ? (obj as any).toDataURL({ multiplier: 2, format: 'png' }) : c?.toDataURL({ multiplier: 2, format: 'png' }); if (dataUrl) { const a = document.createElement('a'); a.download = 'image.png'; a.href = dataUrl; a.click(); } } },
+      { id: 'delete', label: 'Delete', shortcut: 'Del', icon: I.delete, danger: true, onClick: handleDelete },
     ];
 
     const shapeItems: ContextMenuAction[] = [
-      { id: 'fill', label: 'Fill Color', onClick: promptShapeFill },
-      { id: 'outlineColor', label: 'Outline Color', onClick: promptOutlineColor },
-      { id: 'outlineWidth', label: 'Outline Width', onClick: promptOutlineWidth },
-      { id: 'shadow', label: 'Shadow', onClick: () => { const obj = c?.getActiveObject() as any; if (!obj) return; obj.set('shadow', obj.shadow ? null : new fabric.Shadow({ color: 'rgba(0,0,0,0.25)', blur: 8, offsetX: 3, offsetY: 3 })); c?.renderAll(); saveState(); } },
-      { id: 'duplicate', label: 'Duplicate', onClick: handleDuplicate },
-      { id: 'rotate', label: 'Rotate', onClick: handleRotate90 },
-      { id: 'bringForward', label: 'Bring Forward', onClick: handleBringForward },
-      { id: 'sendBackward', label: 'Send Backward', onClick: handleSendBackward },
-      { id: 'delete', label: 'Delete', danger: true, onClick: handleDelete },
+      { id: 'fill', label: 'Fill Color', icon: I.fill, onClick: promptShapeFill },
+      { id: 'outlineColor', label: 'Outline Color', icon: I.outline, onClick: promptOutlineColor },
+      { id: 'outlineWidth', label: 'Outline Width', icon: I.outlineWidth, onClick: promptOutlineWidth },
+      { id: 'shadow', label: 'Shadow', icon: I.shadow, onClick: () => { const obj = c?.getActiveObject() as any; if (!obj) return; obj.set('shadow', obj.shadow ? null : new fabric.Shadow({ color: 'rgba(0,0,0,0.25)', blur: 8, offsetX: 3, offsetY: 3 })); c?.renderAll(); saveState(); } },
+      { id: 'arrange', label: 'Arrange', icon: I.arrange, children: arrangeChildren },
+      { id: 'duplicate', label: 'Duplicate', icon: I.duplicate, onClick: handleDuplicate },
+      { id: 'rotate', label: 'Rotate', icon: I.rotate, onClick: handleRotate90 },
+      { id: 'delete', label: 'Delete', icon: I.delete, danger: true, onClick: handleDelete },
     ];
 
     const multiItems: ContextMenuAction[] = [
-      { id: 'group', label: 'Group', disabled: !active || active.type !== 'activeSelection', onClick: handleGroup },
-      { id: 'ungroup', label: 'Ungroup', disabled: !active || active.type !== 'group', onClick: handleUngroup },
-      { id: 'alignLeft', label: 'Align Left', onClick: () => handleAlign('left') },
-      { id: 'alignCenter', label: 'Align Center', onClick: () => handleAlign('center') },
-      { id: 'alignRight', label: 'Align Right', onClick: () => handleAlign('right') },
-      { id: 'distH', label: 'Distribute Horizontally', onClick: handleDistribute },
-      { id: 'distV', label: 'Distribute Vertically', onClick: handleDistribute },
-      { id: 'duplicate', label: 'Duplicate', onClick: handleDuplicate },
-      { id: 'delete', label: 'Delete', danger: true, onClick: handleDelete },
+      { id: 'group', label: 'Group', icon: I.group, disabled: !active || active.type !== 'activeSelection', onClick: handleGroup },
+      { id: 'ungroup', label: 'Ungroup', icon: I.ungroup, disabled: !active || active.type !== 'group', onClick: handleUngroup },
+      { id: 'alignLeft', label: 'Align Left', icon: I.alignLeft, onClick: () => handleAlign('left') },
+      { id: 'alignCenter', label: 'Align Center', icon: I.alignCenter, onClick: () => handleAlign('center') },
+      { id: 'alignRight', label: 'Align Right', icon: I.alignRight, onClick: () => handleAlign('right') },
+      { id: 'distH', label: 'Distribute Horizontally', icon: I.distH, onClick: handleDistribute },
+      { id: 'distV', label: 'Distribute Vertically', icon: I.distV, onClick: handleDistribute },
+      { id: 'arrange', label: 'Arrange', icon: I.arrange, children: arrangeChildren },
+      { id: 'duplicate', label: 'Duplicate', icon: I.duplicate, onClick: handleDuplicate },
+      { id: 'delete', label: 'Delete', icon: I.delete, danger: true, onClick: handleDelete },
     ];
 
     const groupItems: ContextMenuAction[] = [
-      { id: 'ungroup', label: 'Ungroup', onClick: handleUngroup },
-      { id: 'duplicate', label: 'Duplicate', onClick: handleDuplicate },
-      { id: 'delete', label: 'Delete', danger: true, onClick: handleDelete },
+      { id: 'ungroup', label: 'Ungroup', icon: I.ungroup, onClick: handleUngroup },
+      { id: 'arrange', label: 'Arrange', icon: I.arrange, children: arrangeChildren },
+      { id: 'duplicate', label: 'Duplicate', icon: I.duplicate, onClick: handleDuplicate },
+      { id: 'delete', label: 'Delete', icon: I.delete, danger: true, onClick: handleDelete },
     ];
 
     let items: ContextMenuAction[] = emptyItems;
@@ -3277,7 +3925,17 @@ const Editor: React.FC<EditorProps> = ({ docName, setDocName }) => {
     else if (isMultiMode) items = multiItems;
     else if (isGroupMode) items = groupItems;
     return items;
-  }, [contextMenu?.kind, canUndo, canRedo, undo, redo, handleCut, handleCopy, handlePaste, pasteSpecial, captureFormatting, promptFont, promptParagraph, promptTextColor, promptHighlight, handleOpenLink, handleRemoveLink, handleAddComment, handleSelectAll, handleDelete, handleAddText, handleUploadClick, handleAddShape, handleToggleHeaderFooter, handleInsertPageNumber, handleReplaceClick, handleCrop, handleFlipH, handleFlipV, handleBringForward, handleSendBackward, handleBringToFront, handleSendToBack, handleDuplicate, promptShapeFill, promptOutlineColor, promptOutlineWidth, handleRotate90, handleGroup, handleUngroup, handleAlign, handleDistribute, defaultTextColor, currentTextColor, currentFont, currentTextAlign, currentShapeColor, currentBorderColor, currentBorderWidth]);
+  }, [contextMenu?.kind, canUndo, canRedo, undo, redo, handleCut, handleCopy, handlePaste, pasteSpecial, captureFormatting, promptFont, promptParagraph, promptTextColor, promptHighlight, handleOpenLink, handleRemoveLink, handleAddComment, handleSelectAll, handleDelete, handleAddText, handleUploadClick, handleAddShape, handleToggleHeaderFooter, handleInsertPageNumber, handleReplaceClick, handleCrop, handleFlipH, handleFlipV, handleBringForward, handleSendBackward, handleBringToFront, handleSendToBack, handleDuplicate, handleCropToShape, handleLockPosition, handleFindReplace, promptShapeFill, promptOutlineColor, promptOutlineWidth, handleRotate90, handleGroup, handleUngroup, handleAlign, handleDistribute, defaultTextColor, currentTextColor, currentFont, currentTextAlign, currentShapeColor, currentBorderColor, currentBorderWidth]);
+
+  const visibleMenuItems = useMemo(() => {
+    if (!contextMenuSearch) return contextMenuItems;
+    const q = contextMenuSearch.toLowerCase();
+    return contextMenuItems.filter(item => {
+      if (item.label.toLowerCase().includes(q)) return true;
+      if (item.children) return item.children.some(c => c.label.toLowerCase().includes(q));
+      return false;
+    });
+  }, [contextMenuItems, contextMenuSearch]);
 
   const contextMenuDividerAfter = useMemo(() => {
     switch (contextMenu?.kind) {
@@ -3286,7 +3944,7 @@ const Editor: React.FC<EditorProps> = ({ docName, setDocName }) => {
       case 'empty':
         return new Set(['redo', 'pasteSpecial', 'pageBreak', 'insertShape', 'pageNumber', 'docProps']);
       case 'image':
-        return new Set(['cropShape', 'lockAspect', 'sendToBack']);
+        return new Set<string>();
       case 'shape':
         return new Set(['shadow', 'rotate', 'sendBackward']);
       case 'multi':
@@ -3298,15 +3956,20 @@ const Editor: React.FC<EditorProps> = ({ docName, setDocName }) => {
     }
   }, [contextMenu?.kind]);
 
+  const isSelectableItem = useCallback((item: ContextMenuAction) => {
+    return !item.id.startsWith('separator') && !item.disabled;
+  }, []);
+
   const handleContextMenuItemKeyDown = useCallback((e: React.KeyboardEvent) => {
     if (!contextMenu || contextMenuRef.current == null) return;
-    const enabledItems = contextMenuItems.filter(item => !item.disabled);
+    const items = visibleMenuItems;
+    const enabledItems = items.filter(isSelectableItem);
     if (!enabledItems.length) return;
     if (e.key === 'ArrowDown') {
       e.preventDefault();
       setContextMenuIndex(prev => {
         let next = prev;
-        do { next = (next + 1) % contextMenuItems.length; } while (contextMenuItems[next]?.disabled);
+        do { next = (next + 1) % items.length; } while (!isSelectableItem(items[next]));
         return next;
       });
       return;
@@ -3315,34 +3978,59 @@ const Editor: React.FC<EditorProps> = ({ docName, setDocName }) => {
       e.preventDefault();
       setContextMenuIndex(prev => {
         let next = prev;
-        do { next = (next - 1 + contextMenuItems.length) % contextMenuItems.length; } while (contextMenuItems[next]?.disabled);
+        do { next = (next - 1 + items.length) % items.length; } while (!isSelectableItem(items[next]));
         return next;
       });
       return;
     }
     if (e.key === 'Home') {
       e.preventDefault();
-      setContextMenuIndex(contextMenuItems.findIndex(item => !item.disabled));
+      setContextMenuIndex(items.findIndex(isSelectableItem));
       return;
     }
     if (e.key === 'End') {
       e.preventDefault();
-      for (let i = contextMenuItems.length - 1; i >= 0; i--) {
-        if (!contextMenuItems[i].disabled) { setContextMenuIndex(i); break; }
+      for (let i = items.length - 1; i >= 0; i--) {
+        if (isSelectableItem(items[i])) { setContextMenuIndex(i); break; }
       }
       return;
     }
     if (e.key === 'Enter' || e.key === ' ') {
       e.preventDefault();
-      const item = contextMenuItems[contextMenuIndex];
-      if (item && !item.disabled) item.onClick();
+      const item = items[contextMenuIndex];
+      if (item && isSelectableItem(item)) {
+        if (item.children && item.children.length > 0) {
+          setActiveSubmenu(item.id);
+        } else if (item.onClick) {
+          item.onClick();
+        }
+      }
       return;
+    }
+    if (e.key === 'ArrowRight') {
+      e.preventDefault();
+      const item = items[contextMenuIndex];
+      if (item && item.children && item.children.length > 0) {
+        setActiveSubmenu(item.id);
+      }
+      return;
+    }
+    if (e.key === 'ArrowLeft') {
+      e.preventDefault();
+      if (activeSubmenu) {
+        setActiveSubmenu(null);
+        return;
+      }
     }
     if (e.key === 'Escape') {
       e.preventDefault();
-      closeContextMenu();
+      if (activeSubmenu) {
+        setActiveSubmenu(null);
+      } else {
+        closeContextMenu();
+      }
     }
-  }, [contextMenu, contextMenuIndex, contextMenuItems, closeContextMenu]);
+  }, [contextMenu, contextMenuIndex, visibleMenuItems, closeContextMenu, isSelectableItem, activeSubmenu]);
 
   const handleDocumentContextMenu = useCallback((e: React.MouseEvent) => {
     const target = e.target as HTMLElement;
@@ -3361,11 +4049,18 @@ const Editor: React.FC<EditorProps> = ({ docName, setDocName }) => {
     openContextMenuAt(e.clientX, e.clientY, kind);
   }, [getContextTargetKind, openContextMenuAt]);
 
+  useImperativeHandle(ref, () => ({
+    newDocument: handleNewDocument,
+    markDirty: () => {
+      hasUnsavedChangesRef.current = true;
+    },
+  }), [handleNewDocument]);
+
   void orientation; void showPageBorder; void showCommentsPanel; void handleDeleteComment; void handleResolveComment; void showSymbolPicker; void showInsertUrlDialog; void imageUrl; void imageDimensions; void setImageDimensions;
   void handleTextShadowToggle; void handleTextBgColorChange; void handleTextLetterSpacingChange;
   void handleAllCaps; void handleSmallCaps;
   void handleDistribute; void handleRotate90; void handleAlignToPage;
-  void handleGroup; void handleUngroup; void handleCopyAsImage;
+  void handleGroup; void handleUngroup; void handleCopyAsImage; void handleCropToShape; void handleLockPosition;
   void applyCopiedFormatting; void handleBorderColor; void handleBorderWidth; void handleCornerRadius;
   void handleOpenLinkedUrl; void handleCenter; void handleLock; void handleUnlock;
   return (
@@ -3409,6 +4104,13 @@ const Editor: React.FC<EditorProps> = ({ docName, setDocName }) => {
           onSetLayout={handleSetLayout}
           onSetCustomSize={handleSetCustomSize}
           onSetMargins={handleSetMargins}
+          onOpenCustomMarginsDialog={handleOpenCustomMarginsDialog}
+          onOpenCustomSizeDialog={handleOpenCustomSizeDialog}
+          onSetPageLayoutUnit={handleSetPageLayoutUnit}
+          onSetLineNumbers={handleSetLineNumbers}
+          onSetHyphenation={handleSetHyphenation}
+          onToggleSelectionPane={handleToggleSelectionPane}
+          onParagraphSpacing={handleParagraphSpacing}
           layoutPreset={layoutPreset}
           marginPreset={marginPreset}
           customSize={customSize}
@@ -3475,6 +4177,9 @@ const Editor: React.FC<EditorProps> = ({ docName, setDocName }) => {
           onTextDirection={(dir) => { if (!canvasInstance.current) return; const active = canvasInstance.current.getActiveObject(); if (active && (active.type === 'i-text' || active.type === 'itext')) { active.set('direction', dir); canvasInstance.current.renderAll(); saveState(); } }}
           onTogglePageThumbnails={handleTogglePageThumbnails}
           onToggleRuler={handleToggleRuler}
+          lineNumbersMode={lineNumbersMode}
+          hyphenationMode={hyphenationMode}
+          orientation={orientation}
           onToggleGridlines={handleToggleGridlines}
           onToggleFullScreen={handleToggleFullScreen}
         />
@@ -3503,38 +4208,10 @@ const Editor: React.FC<EditorProps> = ({ docName, setDocName }) => {
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
           </button>
           <div className="qat-separator" />
-          <div ref={qatExportRef} style={{ position: 'relative', display: 'inline-flex' }}>
-            <button className="ribbon-btn primary" onClick={() => setShowQATExport(prev => !prev)} title="Export" style={{ flexDirection: 'row', gap: 6, minHeight: 32, fontSize: 13, padding: '4px 14px' }}>
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
-              Export
-              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3"><polyline points="6 9 12 15 18 9"></polyline></svg>
-            </button>
-            {showQATExport && (
-              <div
-                ref={exportDropdownRef}
-                className="export-dropdown"
-                tabIndex={-1}
-                onKeyDown={handleExportKeydown}
-              >
-                {exportFormats.map((item, i) => (
-                  <button
-                    key={item.key}
-                    className={`export-dropdown-item${i === exportFocusIndex ? ' focused' : ''}`}
-                    onClick={() => { handleExport(item.key); setShowQATExport(false); }}
-                    onMouseEnter={() => setExportFocusIndex(i)}
-                  >
-                    <span className="export-item-icon">
-                      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" dangerouslySetInnerHTML={{ __html: item.icon }} />
-                    </span>
-                    <div className="export-item-text">
-                      <div className="export-item-title">{item.title}</div>
-                      <div className="export-item-desc">{item.desc}</div>
-                    </div>
-                  </button>
-                ))}
-              </div>
-            )}
-          </div>
+          <button className="ribbon-btn primary" onClick={() => { setSaveDialogName(docName || 'Document1'); setSaveDialogFormat('pdf'); setShowSaveDialog(true); }} title="Export" style={{ flexDirection: 'row', gap: 6, minHeight: 32, fontSize: 13, padding: '4px 14px' }}>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+            Export
+          </button>
         </div>,
         document.getElementById('qat-portal')!
       )}
@@ -3549,6 +4226,26 @@ const Editor: React.FC<EditorProps> = ({ docName, setDocName }) => {
                   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="18" height="18" rx="2"></rect></svg>
                   <span>{p.name}</span>
                 </div>
+              ))}
+            </div>
+          </div>
+        )}
+        {showSelectionPane && (
+          <div className="selection-pane">
+            <div className="selection-pane-header">
+              <span>Selection Pane</span>
+              <button className="selection-pane-close" onClick={() => setShowSelectionPane(false)} title="Close">×</button>
+            </div>
+            <div className="selection-pane-content">
+              {(canvasInstance.current?.getObjects() || []).map((obj: any, index: number) => (
+                <button
+                  key={`${obj.type || 'object'}-${index}`}
+                  className={`selection-pane-item${canvasInstance.current?.getActiveObject() === obj ? ' active' : ''}`}
+                  onClick={() => handleSelectSelectionPaneItem(index)}
+                >
+                  <span className="selection-pane-item-label">{obj.name || obj.type || `Object ${index + 1}`}</span>
+                  <span className="selection-pane-item-type">{obj.type || 'object'}</span>
+                </button>
               ))}
             </div>
           </div>
@@ -3625,7 +4322,7 @@ const Editor: React.FC<EditorProps> = ({ docName, setDocName }) => {
                     <div
                       className="page-text-preview"
                       style={{
-                        padding: `${TEXT_PADDING_TOP}px ${TEXT_PADDING_SIDES}px ${TEXT_PADDING_BOTTOM}px`,
+                        padding: `${pageContentPaddingTop}px ${pageContentPaddingRight}px ${pageContentPaddingBottom}px ${pageContentPaddingLeft}px`,
                         fontFamily: "'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif",
                         fontSize: 14, lineHeight: 1.6,
                         color: '#1a1a2e', wordWrap: 'break-word', whiteSpace: 'pre-wrap',
@@ -3730,6 +4427,12 @@ const Editor: React.FC<EditorProps> = ({ docName, setDocName }) => {
             pageWidth={pageWidth}
             pageHeight={pageHeight}
             columns={columns}
+            paddingTop={pageContentPaddingTop}
+            paddingRight={pageContentPaddingRight}
+            paddingBottom={pageContentPaddingBottom}
+            paddingLeft={pageContentPaddingLeft}
+            lineNumbersMode={lineNumbersMode}
+            hyphenationMode={hyphenationMode}
             content={pageTextSegments[activePageIndex] || ''}
             onChange={handleTextContentChange}
             onOverflow={handleTextOverflow}
@@ -3758,50 +4461,105 @@ const Editor: React.FC<EditorProps> = ({ docName, setDocName }) => {
             aria-label="Context menu"
             onKeyDown={handleContextMenuItemKeyDown}
             onClick={(e) => e.stopPropagation()}
+            onMouseLeave={() => setActiveSubmenu(null)}
           >
-            {contextMenuItems.map((item, index) => (
-              <React.Fragment key={item.id}>
-                <button
-                  className={`context-menu-item${item.danger ? ' danger' : ''}${item.disabled ? ' disabled' : ''}${index === contextMenuIndex ? ' active' : ''}`}
-                  disabled={item.disabled}
-                  role="menuitem"
-                  onMouseEnter={() => { if (!item.disabled) setContextMenuIndex(index); }}
-                  onClick={() => { if (!item.disabled) runContextAction(item.onClick); }}
+            <div className="context-menu-search">
+              <div className="context-menu-search-inner">
+                <svg className="context-menu-search-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <circle cx="11" cy="11" r="8" /><line x1="21" y1="21" x2="16.65" y2="16.65" />
+                </svg>
+                <input
+                  type="text"
+                  placeholder="Search the menus..."
+                  value={contextMenuSearch}
+                  onChange={(e) => { setContextMenuSearch(e.target.value); setContextMenuIndex(0); }}
+                  onClick={(e) => e.stopPropagation()}
+                  onKeyDown={(e) => { e.stopPropagation(); if (e.key === 'Escape') closeContextMenu(); }}
+                  autoFocus
+                />
+              </div>
+            </div>
+            {visibleMenuItems.map((item, index) => {
+              if (item.id.startsWith('separator')) {
+                return <div key={item.id} className="context-menu-divider" />;
+              }
+              const hasSubmenu = item.children && item.children.length > 0;
+              const showSubmenu = hasSubmenu && activeSubmenu === item.id;
+              const shouldFlipSubmenu = contextMenu && (contextMenu.x + 340 + 240 > window.innerWidth - 10);
+              return (
+                <div key={item.id} className="context-menu-item-wrap"
+                  onMouseEnter={() => {
+                    if (!item.disabled) setContextMenuIndex(index);
+                    if (hasSubmenu) setActiveSubmenu(item.id);
+                  }}
                 >
-                  <span>{item.label}</span>
-                  {item.shortcut && <span className="context-menu-shortcut">{item.shortcut}</span>}
-                </button>
-                {contextMenuDividerAfter.has(item.id) && index < contextMenuItems.length - 1 && <div className="context-menu-divider" />}
-              </React.Fragment>
-            ))}
-          </div>
-        )}
-        {contextMenu && (
-          <div
-            ref={contextMenuRef}
-            className="context-menu"
-            style={{ left: contextMenu.x, top: contextMenu.y }}
-            tabIndex={-1}
-            role="menu"
-            aria-label="Context menu"
-            onKeyDown={handleContextMenuItemKeyDown}
-            onClick={(e) => e.stopPropagation()}
-          >
-            {contextMenuItems.map((item, index) => (
-              <React.Fragment key={item.id}>
-                <button
-                  className={`context-menu-item${item.danger ? ' danger' : ''}${item.disabled ? ' disabled' : ''}${index === contextMenuIndex ? ' active' : ''}`}
-                  disabled={item.disabled}
-                  role="menuitem"
-                  onMouseEnter={() => { if (!item.disabled) setContextMenuIndex(index); }}
-                  onClick={() => { if (!item.disabled) runContextAction(item.onClick); }}
-                >
-                  <span>{item.label}</span>
-                  {item.shortcut && <span className="context-menu-shortcut">{item.shortcut}</span>}
-                </button>
-                {contextMenuDividerAfter.has(item.id) && index < contextMenuItems.length - 1 && <div className="context-menu-divider" />}
-              </React.Fragment>
-            ))}
+                  <button
+                    className={`context-menu-item${item.danger ? ' danger' : ''}${item.disabled ? ' disabled' : ''}${index === contextMenuIndex ? ' active' : ''}${hasSubmenu ? ' has-submenu' : ''}`}
+                    disabled={item.disabled}
+                    role="menuitem"
+                    onClick={() => {
+                      if (!item.disabled && item.onClick) runContextAction(item.onClick);
+                    }}
+                  >
+                    {item.icon !== undefined && (
+                      <span className="context-menu-icon">
+                        {item.icon ? (
+                          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                            <path d={item.icon} />
+                          </svg>
+                        ) : (
+                          <span className="context-menu-icon-placeholder" />
+                        )}
+                      </span>
+                    )}
+                    {item.checked !== undefined && (
+                      <span className="context-menu-check">
+                        {item.checked ? (
+                          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                            <polyline points="20 6 9 17 4 12" />
+                          </svg>
+                        ) : null}
+                      </span>
+                    )}
+                    <span className="context-menu-label-text">{item.label}</span>
+                    {item.shortcut && <span className="context-menu-shortcut">{item.shortcut}</span>}
+                    {hasSubmenu && (
+                      <span className="context-menu-submenu-arrow">
+                        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                          <polyline points="9 18 15 12 9 6" />
+                        </svg>
+                      </span>
+                    )}
+                  </button>
+                  {hasSubmenu && showSubmenu && (
+                    <div className={`context-submenu${shouldFlipSubmenu ? ' flip-left' : ''}`}
+                      style={shouldFlipSubmenu ? { left: 'auto', right: 'calc(100% + 8px)' } : {}}
+                    >
+                      {item.children!.map((child) => (
+                        <button
+                          key={child.id}
+                          className={`context-menu-item${child.danger ? ' danger' : ''}${child.disabled ? ' disabled' : ''}`}
+                          disabled={child.disabled}
+                          role="menuitem"
+                          onClick={() => { if (!child.disabled && child.onClick) runContextAction(child.onClick); }}
+                        >
+                          {child.icon && (
+                            <span className="context-menu-icon">
+                              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                                <path d={child.icon} />
+                              </svg>
+                            </span>
+                          )}
+                          <span className="context-menu-label-text">{child.label}</span>
+                          {child.shortcut && <span className="context-menu-shortcut">{child.shortcut}</span>}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                  {contextMenuDividerAfter.has(item.id) && index < contextMenuItems.length - 1 && <div className="context-menu-divider" />}
+                </div>
+              );
+            })}
           </div>
         )}
 
@@ -3902,6 +4660,75 @@ const Editor: React.FC<EditorProps> = ({ docName, setDocName }) => {
         </div>
       )}
 
+      {showCustomMarginsDialog && (
+        <div className="symbol-picker-overlay" onClick={() => setShowCustomMarginsDialog(false)}>
+          <div className="find-replace-dialog custom-layout-dialog" onClick={e => e.stopPropagation()}>
+            <div className="find-replace-header">Custom Margins</div>
+            <div className="find-replace-body">
+              <div className="layout-dialog-grid">
+                {(['top', 'bottom', 'left', 'right', 'header', 'footer', 'gutter'] as const).map(field => (
+                  <label key={field} className="layout-dialog-field">
+                    <span>{field.charAt(0).toUpperCase() + field.slice(1)}</span>
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.1"
+                      value={pageMargins[field]}
+                      onChange={e => setPageMargins(prev => ({ ...prev, [field]: parseFloat(e.target.value) || 0 }))}
+                    />
+                  </label>
+                ))}
+                <label className="layout-dialog-field">
+                  <span>Units</span>
+                  <select value={pageLayoutUnit} onChange={e => setPageLayoutUnit(e.target.value as PageLayoutUnit)}>
+                    <option value="in">Inches</option>
+                    <option value="cm">Centimeters</option>
+                  </select>
+                </label>
+              </div>
+            </div>
+            <div className="find-replace-actions">
+              <button className="find-replace-btn" onClick={() => setShowCustomMarginsDialog(false)}>Cancel</button>
+              <button className="find-replace-btn find-replace-btn-primary" onClick={() => handleApplyCustomMargins(pageMargins)}>Apply</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showCustomSizeDialog && (
+        <div className="symbol-picker-overlay" onClick={() => setShowCustomSizeDialog(false)}>
+          <div className="find-replace-dialog custom-layout-dialog" onClick={e => e.stopPropagation()}>
+            <div className="find-replace-header">Custom Size</div>
+            <div className="find-replace-body">
+              <div className="layout-dialog-grid layout-dialog-grid-two">
+                <label className="layout-dialog-field">
+                  <span>Width</span>
+                  <input
+                    type="number"
+                    min="1"
+                    value={customSize.w}
+                    onChange={e => setCustomSize(prev => ({ ...prev, w: parseInt(e.target.value) || prev.w }))}
+                  />
+                </label>
+                <label className="layout-dialog-field">
+                  <span>Height</span>
+                  <input
+                    type="number"
+                    min="1"
+                    value={customSize.h}
+                    onChange={e => setCustomSize(prev => ({ ...prev, h: parseInt(e.target.value) || prev.h }))}
+                  />
+                </label>
+              </div>
+            </div>
+            <div className="find-replace-actions">
+              <button className="find-replace-btn" onClick={() => setShowCustomSizeDialog(false)}>Cancel</button>
+              <button className="find-replace-btn find-replace-btn-primary" onClick={() => handleApplyCustomSize(customSize.w, customSize.h)}>Apply</button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {showSymbolPicker && (
         <div className="symbol-picker-overlay" onClick={() => setShowSymbolPicker(false)}>
           <div className="symbol-picker-dialog" onClick={e => e.stopPropagation()}>
@@ -3953,12 +4780,7 @@ const Editor: React.FC<EditorProps> = ({ docName, setDocName }) => {
           </div>
         </div>
       )}
-
-
-
-
       </div>
-
       {!canvasEmpty && pages.length > 0 && (
         <div className="doc-stats-bar">
           <div className="status-section" onClick={() => setShowGoToPage(true)} title="Go to page (Ctrl+G)">
@@ -4034,13 +4856,15 @@ const Editor: React.FC<EditorProps> = ({ docName, setDocName }) => {
             onClick={e => e.stopPropagation()}
             role="dialog"
             aria-modal="true"
-            aria-label="Unsaved changes"
+            aria-label="Save changes before leaving?"
           >
-            <h2 className="unsaved-modal-title">Unsaved Changes</h2>
-            <p className="unsaved-modal-text">You have unsaved changes. Would you like to save your project before leaving?</p>
+            <div className="unsaved-modal-body">
+              <h2 className="unsaved-modal-title">You have unsaved changes.</h2>
+              <p className="unsaved-modal-text">Do you want to save your document before leaving?</p>
+            </div>
             <div className="unsaved-modal-actions">
               <button className="unsaved-modal-btn unsaved-modal-btn-primary" onClick={handleUnsavedSave} autoFocus>
-                Save Project
+                Save & Leave
               </button>
               <button className="unsaved-modal-btn unsaved-modal-btn-danger" onClick={handleUnsavedLeave}>
                 Leave Without Saving
@@ -4053,35 +4877,248 @@ const Editor: React.FC<EditorProps> = ({ docName, setDocName }) => {
         </div>
       )}
 
-      {showSaveFormat && (
-        <div className="unsaved-modal-overlay" onClick={() => setShowSaveFormat(false)}>
+      {showSaveDialog && (
+        <div className="save-dialog-overlay" onClick={handleSaveDialogCancel}>
           <div
-            className="unsaved-modal"
+            className="save-dialog"
             onClick={e => e.stopPropagation()}
             role="dialog"
             aria-modal="true"
-            aria-label="Select format"
+            aria-label="Save As"
           >
-            <h2 className="unsaved-modal-title">Save Project As</h2>
-            <p className="unsaved-modal-text">Select a format to export your project.</p>
-            <div className="save-format-grid">
-              {['PNG', 'JPG', 'JPEG', 'SVG', 'PDF', 'JSON', 'DOCX'].map(fmt => (
-                <button
-                  key={fmt}
-                  className={`save-format-btn${selectedFormat === fmt.toLowerCase() ? ' active' : ''}`}
-                  onClick={() => handleSaveFormat(fmt.toLowerCase())}
-                >
-                  {fmt}
+            <div className="save-dialog-header">
+              <div className="save-dialog-title-row">
+                <div className="save-dialog-title">Save As</div>
+                <button className="save-dialog-close" onClick={handleSaveDialogCancel} title="Close">
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
                 </button>
-              ))}
+              </div>
+              <div className="save-dialog-subtitle">Choose how you want to export your document.</div>
             </div>
-            <div className="unsaved-modal-actions" style={{ marginTop: 16 }}>
-              <button className="unsaved-modal-btn unsaved-modal-btn-primary" onClick={handleConfirmLeave}>
-                Confirm & Leave
-              </button>
-              <button className="unsaved-modal-btn" onClick={() => setShowSaveFormat(false)}>
-                Back
-              </button>
+
+            <div className="save-dialog-body">
+              {/* Document Name */}
+              <div className="save-dialog-field">
+                <label className="save-dialog-label">Document Name</label>
+                <div className="save-dialog-name-row">
+                  <input
+                    className="save-dialog-input"
+                    type="text"
+                    value={saveDialogName}
+                    onChange={e => setSaveDialogName(e.target.value)}
+                    onKeyDown={e => { if (e.key === 'Enter') handleSaveDialogSave(); }}
+                    autoFocus
+                    spellCheck={false}
+                  />
+                  <span className="save-dialog-ext">
+                    .{saveDialogFormat === 'pdf' ? 'pdf' : saveDialogFormat === 'docx' ? 'docx' : saveDialogFormat === 'svg' ? 'svg' : saveDialogFormat === 'json' ? 'json' : saveDialogFormat === 'jpg' ? 'jpg' : 'png'}
+                  </span>
+                </div>
+              </div>
+
+              {/* Export Format Cards */}
+              <div className="save-dialog-field">
+                <label className="save-dialog-label">Export Format</label>
+                <div className="save-dialog-cards">
+                  {[
+                    { key: 'pdf', icon: 'fa-regular fa-file-pdf', label: 'PDF', desc: 'Best for printing and sharing' },
+                    { key: 'docx', icon: 'fa-regular fa-file-word', label: 'DOCX', desc: 'Editable Microsoft Word document' },
+                    { key: 'png', icon: 'fa-regular fa-file-image', label: 'PNG', desc: 'High quality image' },
+                    { key: 'jpg', icon: 'fa-regular fa-file-image', label: 'JPG', desc: 'Compressed image' },
+                    { key: 'svg', icon: 'fa-regular fa-file-code', label: 'SVG', desc: 'Scalable vector graphic' },
+                    { key: 'json', icon: 'fa-regular fa-file-code', label: 'JSON', desc: 'Project data' },
+                  ].map(fmt => (
+                    <button
+                      key={fmt.key}
+                      className={`save-dialog-card${saveDialogFormat === fmt.key ? ' active' : ''}`}
+                      onClick={() => { setSaveDialogFormat(fmt.key); }}
+                    >
+                      <div className="save-dialog-card-icon"><i className={fmt.icon}></i></div>
+                      <div className="save-dialog-card-label">{fmt.label}</div>
+                      <div className="save-dialog-card-desc">{fmt.desc}</div>
+                      {saveDialogFormat === fmt.key && (
+                        <div className="save-dialog-card-check">
+                          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+                        </div>
+                      )}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Advanced Options */}
+              {saveDialogFormat === 'pdf' && (
+                <div className="save-dialog-advanced">
+                  <div className="save-dialog-advanced-title">Advanced Options</div>
+                  <div className="save-dialog-advanced-grid">
+                    <div className="save-dialog-opt-group">
+                      <label className="save-dialog-opt-label">Page Size</label>
+                      <div className="save-dialog-opt-row">
+                        {['A4', 'Letter', 'Legal'].map(s => (
+                          <button key={s} className={`save-dialog-chip${exportPageSize === s.toLowerCase() ? ' active' : ''}`} onClick={() => setExportPageSize(s.toLowerCase())}>{s}</button>
+                        ))}
+                      </div>
+                    </div>
+                    <div className="save-dialog-opt-group">
+                      <label className="save-dialog-opt-label">Orientation</label>
+                      <div className="save-dialog-opt-row">
+                        {['Portrait', 'Landscape'].map(s => (
+                          <button key={s} className={`save-dialog-chip${exportOrientation === s.toLowerCase() ? ' active' : ''}`} onClick={() => setExportOrientation(s.toLowerCase())}>{s}</button>
+                        ))}
+                      </div>
+                    </div>
+                    <div className="save-dialog-opt-group">
+                      <label className="save-dialog-opt-label">Margins</label>
+                      <div className="save-dialog-opt-row">
+                        {['Normal', 'Narrow', 'Wide'].map(s => (
+                          <button key={s} className={`save-dialog-chip${exportMargins === s.toLowerCase() ? ' active' : ''}`} onClick={() => setExportMargins(s.toLowerCase())}>{s}</button>
+                        ))}
+                      </div>
+                    </div>
+                    <div className="save-dialog-opt-group">
+                      <label className="save-dialog-opt-label">Quality</label>
+                      <div className="save-dialog-opt-row">
+                        {['Standard', 'High'].map(s => (
+                          <button key={s} className={`save-dialog-chip${exportQuality === s.toLowerCase() ? ' active' : ''}`} onClick={() => setExportQuality(s.toLowerCase())}>{s}</button>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                  <div className="save-dialog-checkbox-row">
+                    <label className="save-dialog-checkbox">
+                      <input type="checkbox" checked={exportOpenAfter} onChange={e => setExportOpenAfter(e.target.checked)} />
+                      <span className="save-dialog-checkbox-mark">
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="3"><polyline points="20 6 9 17 4 12"/></svg>
+                      </span>
+                      <span>Open after export</span>
+                    </label>
+                    <label className="save-dialog-checkbox">
+                      <input type="checkbox" checked={exportIncludeBg} onChange={e => setExportIncludeBg(e.target.checked)} />
+                      <span className="save-dialog-checkbox-mark">
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="3"><polyline points="20 6 9 17 4 12"/></svg>
+                      </span>
+                      <span>Include background</span>
+                    </label>
+                  </div>
+                </div>
+              )}
+
+              {(saveDialogFormat === 'png' || saveDialogFormat === 'jpg') && (
+                <div className="save-dialog-advanced">
+                  <div className="save-dialog-advanced-title">Advanced Options</div>
+                  <div className="save-dialog-advanced-grid">
+                    <div className="save-dialog-opt-group">
+                      <label className="save-dialog-opt-label">Resolution</label>
+                      <div className="save-dialog-opt-row">
+                        {['72 DPI', '150 DPI', '300 DPI', '600 DPI'].map(s => (
+                          <button key={s} className={`save-dialog-chip${exportResolution === s.split(' ')[0] ? ' active' : ''}`} onClick={() => setExportResolution(s.split(' ')[0])}>{s}</button>
+                        ))}
+                      </div>
+                    </div>
+                    <div className="save-dialog-opt-group">
+                      <label className="save-dialog-opt-label">Scale</label>
+                      <div className="save-dialog-opt-row">
+                        {['1×', '2×', '3×'].map(s => (
+                          <button key={s} className={`save-dialog-chip${exportScale === s.replace('×','') ? ' active' : ''}`} onClick={() => setExportScale(s.replace('×',''))}>{s}</button>
+                        ))}
+                      </div>
+                    </div>
+                    {saveDialogFormat === 'png' && (
+                      <div className="save-dialog-opt-group">
+                        <label className="save-dialog-opt-label">Background</label>
+                        <div className="save-dialog-opt-row">
+                          {['White', 'Transparent'].map(s => (
+                            <button key={s} className={`save-dialog-chip${(exportTransparentBg && s === 'Transparent') || (!exportTransparentBg && s === 'White') ? ' active' : ''}`} onClick={() => setExportTransparentBg(s === 'Transparent')}>{s}</button>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                    {saveDialogFormat === 'jpg' && (
+                      <div className="save-dialog-opt-group">
+                        <label className="save-dialog-opt-label">JPEG Quality</label>
+                        <div className="save-dialog-opt-row">
+                          {['75%', '100%'].map(s => (
+                            <button key={s} className={`save-dialog-chip${exportJpegQuality === s.replace('%','') ? ' active' : ''}`} onClick={() => setExportJpegQuality(s.replace('%',''))}>{s}</button>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {saveDialogFormat === 'docx' && (
+                <div className="save-dialog-advanced">
+                  <div className="save-dialog-advanced-title">Advanced Options</div>
+                  <div className="save-dialog-advanced-grid">
+                    <div className="save-dialog-opt-group">
+                      <label className="save-dialog-opt-label">Compatibility</label>
+                      <div className="save-dialog-opt-row">
+                        {['Microsoft Word', 'LibreOffice'].map(s => (
+                          <button key={s} className={`save-dialog-chip${exportDocxCompat === s.toLowerCase().replace(' ','') ? ' active' : ''}`} onClick={() => setExportDocxCompat(s.toLowerCase().replace(' ',''))}>{s}</button>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                  <div className="save-dialog-checkbox-row">
+                    <label className="save-dialog-checkbox">
+                      <input type="checkbox" checked={exportEmbedFonts} onChange={e => setExportEmbedFonts(e.target.checked)} />
+                      <span className="save-dialog-checkbox-mark">
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="3"><polyline points="20 6 9 17 4 12"/></svg>
+                      </span>
+                      <span>Embed Fonts</span>
+                    </label>
+                    <label className="save-dialog-checkbox">
+                      <input type="checkbox" checked={exportPreserveFormatting} onChange={e => setExportPreserveFormatting(e.target.checked)} />
+                      <span className="save-dialog-checkbox-mark">
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="3"><polyline points="20 6 9 17 4 12"/></svg>
+                      </span>
+                      <span>Preserve Formatting</span>
+                    </label>
+                  </div>
+                </div>
+              )}
+
+              {saveDialogFormat === 'json' && (
+                <div className="save-dialog-advanced">
+                  <div className="save-dialog-advanced-title">Advanced Options</div>
+                  <div className="save-dialog-opt-row">
+                    <button className={`save-dialog-chip${exportJsonPretty ? ' active' : ''}`} onClick={() => setExportJsonPretty(true)}>Pretty Print</button>
+                    <button className={`save-dialog-chip${!exportJsonPretty ? ' active' : ''}`} onClick={() => setExportJsonPretty(false)}>Compressed</button>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div className="save-dialog-footer">
+              <div className="save-dialog-footer-left">
+                <span className="save-dialog-filename-preview">{
+                  (saveDialogName.trim() || 'Document1') + '.' + (saveDialogFormat === 'pdf' ? 'pdf' : saveDialogFormat === 'docx' ? 'docx' : saveDialogFormat === 'svg' ? 'svg' : saveDialogFormat === 'json' ? 'json' : saveDialogFormat === 'jpg' ? 'jpg' : 'png')
+                }</span>
+              </div>
+              <div className="save-dialog-footer-right">
+                <button className="save-dialog-btn" onClick={handleSaveDialogCancel} disabled={exportLoading}>
+                  Cancel
+                </button>
+                <button className="save-dialog-btn save-dialog-btn-primary" onClick={handleSaveDialogSave} disabled={exportLoading}>
+                  {exportLoading ? (
+                    <>
+                      <span className="save-dialog-spinner" />
+                      Exporting…
+                    </>
+                  ) : exportSuccessFile ? (
+                    <>
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+                      Exported!
+                    </>
+                  ) : (
+                    <>
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                      Export Document
+                    </>
+                  )}
+                </button>
+              </div>
             </div>
           </div>
         </div>
@@ -4097,6 +5134,22 @@ const Editor: React.FC<EditorProps> = ({ docName, setDocName }) => {
               </svg>
               <h2 className="unsaved-modal-title" style={{ marginTop: 16 }}>Success!</h2>
               <p className="unsaved-modal-text">Action completed successfully.</p>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showError && (
+        <div className="unsaved-modal-overlay">
+          <div className="unsaved-modal" role="dialog" aria-modal="true" aria-label="Error">
+            <div style={{ textAlign: 'center', padding: '20px 0' }}>
+              <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="#ef4444" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="12" cy="12" r="10"></circle>
+                <line x1="15" y1="9" x2="9" y2="15"></line>
+                <line x1="9" y1="9" x2="15" y2="15"></line>
+              </svg>
+              <h2 className="unsaved-modal-title" style={{ marginTop: 16 }}>Error</h2>
+              <p className="unsaved-modal-text">{errorMessage}</p>
             </div>
           </div>
         </div>
@@ -4227,6 +5280,6 @@ const Editor: React.FC<EditorProps> = ({ docName, setDocName }) => {
       )}
     </div>
   );
-};
+});
 
 export default Editor;

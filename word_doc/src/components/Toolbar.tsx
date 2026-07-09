@@ -6,6 +6,7 @@ const MARGIN_PRESETS: Record<string, { t: number; b: number; l: number; r: numbe
   narrow: { t: 48, b: 48, l: 48, r: 48 },
   moderate: { t: 96, b: 96, l: 72, r: 72 },
   wide: { t: 96, b: 96, l: 192, r: 192 },
+  mirrored: { t: 96, b: 96, l: 96, r: 96 },
 };
 const AVAILABLE_FONTS = [
   'Inter, sans-serif', 'Arial', 'Helvetica', 'Times New Roman', 'Georgia',
@@ -73,6 +74,24 @@ interface ToolbarProps {
   onSetLayout: (preset: string) => void;
   onSetCustomSize: (w: number, h: number) => void;
   onSetMargins: (preset: string) => void;
+  onOpenCustomMarginsDialog?: () => void;
+  onOpenCustomSizeDialog?: () => void;
+  onSetPageLayoutUnit?: (unit: 'cm' | 'in') => void;
+  onSetLineNumbers?: (mode: 'none' | 'continuous' | 'restart-page' | 'restart-section') => void;
+  onSetHyphenation?: (mode: 'none' | 'automatic' | 'manual') => void;
+  onInsertBreak?: (kind: 'page' | 'column' | 'section-next' | 'continuous' | 'odd' | 'even') => void;
+  onToggleSelectionPane?: () => void;
+  onBringForward?: () => void;
+  onSendBackward?: () => void;
+  onBringToFront?: () => void;
+  onSendToBack?: () => void;
+  onGroup?: () => void;
+  onUngroup?: () => void;
+  onRotate?: () => void;
+  onAlignToPage?: () => void;
+  onAlign?: (dir: 'left' | 'center' | 'right' | 'top' | 'middle' | 'bottom') => void;
+  onDistribute?: () => void;
+  onParagraphSpacing?: (before: number, after: number) => void;
   layoutPreset: string;
   marginPreset: string;
   customSize: { w: number; h: number };
@@ -140,6 +159,9 @@ interface ToolbarProps {
   onToggleRuler?: () => void;
   onToggleGridlines?: () => void;
   onToggleFullScreen?: () => void;
+  lineNumbersMode?: string;
+  hyphenationMode?: string;
+  orientation?: string;
 }
 
 const Toolbar: React.FC<ToolbarProps> = ({
@@ -151,6 +173,10 @@ const Toolbar: React.FC<ToolbarProps> = ({
   onReplaceImage,
   onToggleRibbon,
   onSetLayout, onSetCustomSize, onSetMargins,
+  onOpenCustomMarginsDialog, onOpenCustomSizeDialog, onSetPageLayoutUnit,
+  onSetLineNumbers, onSetHyphenation, onInsertBreak,
+  onToggleSelectionPane, onBringForward, onSendBackward, onBringToFront, onSendToBack,
+  onGroup, onUngroup, onRotate, onAlignToPage, onAlign, onDistribute, onParagraphSpacing,
   layoutPreset, marginPreset, customSize,
   currentTextColor, onTextColorChange,
   isBold, onBold, isItalic, onItalic, isUnderline, onUnderline,
@@ -172,7 +198,7 @@ const Toolbar: React.FC<ToolbarProps> = ({
   onLineSpacing, onHyperlink,
   onCut, onCopy, onCopyAsImage, onPaste, onIncreaseFontSize, onDecreaseFontSize,
   onTogglePageThumbnails, onToggleRuler, onToggleGridlines, onToggleFullScreen,
-  currentStyle,
+  currentStyle, lineNumbersMode, hyphenationMode, orientation,
 }) => {
   const [activeTab, setActiveTab] = useState('home');
   const [showLayout, setShowLayout] = useState(false);
@@ -199,15 +225,12 @@ const Toolbar: React.FC<ToolbarProps> = ({
     setCanScrollLeft(el.scrollLeft > 4);
     setCanScrollRight(el.scrollLeft + el.clientWidth < el.scrollWidth - 4);
   }, []);
-  const [showExport, setShowExport] = useState(false);
-  void showExport; void setShowExport;
   const [showAspectRatio, setShowAspectRatio] = useState(false);
   const [showImageDropdown, setShowImageDropdown] = useState(false);
   const [showFontSize, setShowFontSize] = useState(false);
   const [listType, setListType] = useState<'none' | 'bullet' | 'number' | 'multi-level'>('none');
   const [lineSpacing, setLineSpacing] = useState(1.15);
   const shapeRef = useRef<HTMLDivElement>(null);
-  const exportRef = useRef<HTMLDivElement>(null);
   const aspectRatioRef = useRef<HTMLDivElement>(null);
   const imageDropdownRef = useRef<HTMLDivElement>(null);
   const moreStylesRef = useRef<HTMLDivElement>(null);
@@ -217,7 +240,6 @@ const Toolbar: React.FC<ToolbarProps> = ({
 
   interface DropdownPos { top: number; left: number; upward: boolean; }
   const [shapePos, setShapePos] = useState<DropdownPos | null>(null);
-  const [exportPos, setExportPos] = useState<DropdownPos | null>(null);
   const [aspectRatioPos, setAspectRatioPos] = useState<DropdownPos | null>(null);
   const [imageDropdownPos, setImageDropdownPos] = useState<DropdownPos | null>(null);
   const [fontSizePos, setFontSizePos] = useState<DropdownPos | null>(null);
@@ -235,6 +257,7 @@ const Toolbar: React.FC<ToolbarProps> = ({
   const positionRef = useRef<HTMLDivElement>(null);
   const [showPosition, setShowPosition] = useState(false);
   const [positionPos, setPositionPos] = useState<DropdownPos | null>(null);
+  const hasArrangeSelection = isImageSelected || isShapeSelected;
 
   const calcPos = (ref: React.RefObject<HTMLDivElement | null>, width: number, alignRight = false): DropdownPos | null => {
     if (!ref.current) return null;
@@ -251,10 +274,42 @@ const Toolbar: React.FC<ToolbarProps> = ({
     return { top, left, upward };
   };
 
+  const [openDropdown, setOpenDropdown] = useState<string | null>(null);
+  const [dropdownPosArr, setDropdownPosArr] = useState<DropdownPos | null>(null);
+  const dropdownRefs = useRef<Record<string, HTMLDivElement | null>>({});
+
+  const toggleDropdown = useCallback((name: string, ref: React.RefObject<HTMLDivElement | null>, width: number) => {
+    if (openDropdown === name) {
+      setOpenDropdown(null);
+      setDropdownPosArr(null);
+      return;
+    }
+    if (!ref.current) return;
+    const btn = ref.current.querySelector('button');
+    if (!btn) return;
+    const r = btn.getBoundingClientRect();
+    const estH = 300;
+    const spaceBelow = window.innerHeight - r.bottom - 8;
+    const upward = spaceBelow < estH && r.top > estH + 8;
+    const left = Math.max(8, Math.min(r.left, window.innerWidth - width - 8));
+    const top = upward ? Math.max(4, r.top - estH - 4) : r.bottom + 4;
+    setDropdownPosArr({ top, left, upward });
+    setOpenDropdown(name);
+  }, [openDropdown]);
+
+  const closeDropdown = useCallback(() => {
+    setOpenDropdown(null);
+    setDropdownPosArr(null);
+  }, []);
+
+  const closeLayoutMenu = () => {
+    setShowLayout(false);
+    setLayoutPos(null);
+  };
+
   useEffect(() => {
     const handler = (e: MouseEvent) => {
       if (shapeRef.current && !shapeRef.current.contains(e.target as Node)) { setShowShape(false); setShapePos(null); }
-      if (exportRef.current && !exportRef.current.contains(e.target as Node)) { setShowExport(false); setExportPos(null); }
       if (aspectRatioRef.current && !aspectRatioRef.current.contains(e.target as Node)) { setShowAspectRatio(false); setAspectRatioPos(null); }
       if (imageDropdownRef.current && !imageDropdownRef.current.contains(e.target as Node)) { setShowImageDropdown(false); setImageDropdownPos(null); }
       if (fontSizeRef.current && !fontSizeRef.current.contains(e.target as Node)) { setShowFontSize(false); setFontSizePos(null); }
@@ -265,10 +320,17 @@ const Toolbar: React.FC<ToolbarProps> = ({
       if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) { setShowWrap(false); setWrapPos(null); }
       if (moreStylesRef.current && !moreStylesRef.current.contains(e.target as Node)) { setShowMoreStyles(false); setMoreStylesPos(null); }
       if (moreGroupsRef.current && !moreGroupsRef.current.contains(e.target as Node)) { setShowMoreGroups(false); setMoreGroupsPos(null); }
+      if (openDropdown) {
+        const container = dropdownRefs.current[openDropdown];
+        if (container && !container.contains(e.target as Node)) {
+          setOpenDropdown(null);
+          setDropdownPosArr(null);
+        }
+      }
     };
     window.addEventListener('mousedown', handler);
     return () => window.removeEventListener('mousedown', handler);
-  }, []);
+  }, [openDropdown]);
 
   useEffect(() => {
     const el = ribbonContentRef.current;
@@ -317,17 +379,24 @@ const Toolbar: React.FC<ToolbarProps> = ({
   const TABS: { id: string; label: string }[] = [
     { id: 'home', label: 'Home' },
     { id: 'insert', label: 'Insert' },
-    { id: 'design', label: 'Design' },
+    { id: 'layout', label: 'Layout' },
     { id: 'view', label: 'View' },
     { id: 'review', label: 'Review' },
     { id: 'help', label: 'Help' },
   ];
 
-  type TabId = 'home' | 'insert' | 'design' | 'view' | 'review' | 'help';
+  type TabId = 'home' | 'insert' | 'layout' | 'view' | 'review' | 'help';
 
-  void lineSpacing; void setLineSpacing; void exportPos; void showBorder; void borderPos; void showStyle; void stylePos; void showPosition; void positionPos;
+  void lineSpacing; void setLineSpacing; void showBorder; void borderPos; void showStyle; void stylePos; void showPosition; void positionPos;
   void FONT_SIZES; void showFontSize; void fontSizePos;
   void isTextSelected;
+  void onOpenCustomMarginsDialog; void onOpenCustomSizeDialog; void onSetPageLayoutUnit; void onSetLineNumbers; void onSetHyphenation; void onInsertBreak;
+  void onToggleSelectionPane; void onBringForward; void onSendBackward; void onBringToFront; void onSendToBack; void onGroup; void onUngroup; void onRotate; void onAlignToPage; void onAlign; void onDistribute; void onParagraphSpacing;
+  void showLayout; void layoutPos; void closeLayoutMenu; void showWrap; void wrapPos; void showAspectRatio; void aspectRatioPos; void showImageDropdown; void imageDropdownPos;
+  void onCrop; void onRotateRight; void onSetAspectRatio; void onReplaceImage;
+  void currentShapeColor; void onShapeColorChange; void currentFilter; void onApplyFilter;
+  void onImageTransparency; void onImageBorder; void onImageShadow; void imageTransparency; void imageShadowEnabled;
+  void onSetColumns; void onTogglePageBorder; void onShapeGradient; void filters;
 
   const exec = (cmd: string, val?: string) => {
     const editor = document.querySelector('[data-page-editor="true"]') as HTMLElement;
@@ -690,7 +759,7 @@ const Toolbar: React.FC<ToolbarProps> = ({
                     </button>
                   </div>
                 </div>
-                <div className="fluent-group-label">Editing</div>
+<div className="fluent-group-label">Editing</div>
               </div>
 
               {/* More (⋯) button for collapsed groups */}
@@ -858,247 +927,290 @@ const Toolbar: React.FC<ToolbarProps> = ({
             </>
           )}
 
-          {(activeTab as TabId) === 'design' && (
+          {(activeTab as TabId) === 'layout' && (
             <>
               <div className="fluent-group">
                 <div className="fluent-group-items">
-                  <div ref={layoutRef} className="fluent-dropdown-container"
-                    onMouseEnter={() => { clearHover(); if (!showLayout) { const p = calcPos(layoutRef, 280); if (p) { setLayoutPos(p); setShowLayout(true); } } }}
-                    onMouseLeave={() => { hoverTimer.current = window.setTimeout(() => { setShowLayout(false); setLayoutPos(null); }, 250); }}>
-                    <button className="fluent-btn with-icon" onClick={() => {
-                      if (showLayout) { setShowLayout(false); setLayoutPos(null); }
-                      else { const p = calcPos(layoutRef, 280); if (p) { setLayoutPos(p); setShowLayout(true); } }
-                    }} title="Layout">
-                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                        <rect x="3" y="3" width="18" height="18" rx="2"></rect>
-                        <line x1="3" y1="9" x2="21" y2="9"></line>
-                        <line x1="9" y1="3" x2="9" y2="21"></line>
-                      </svg>
-                      <span className="fluent-btn-label">Page Setup</span>
+                  <div ref={el => dropdownRefs.current['margins'] = el} className="fluent-dropdown-container"
+                    onMouseEnter={() => { clearHover(); if (openDropdown !== 'margins') { const p = calcPos({current: dropdownRefs.current['margins'] as HTMLDivElement} as any, 220); if (p) { setDropdownPosArr(p); setOpenDropdown('margins'); } } }}
+                    onMouseLeave={() => { hoverTimer.current = window.setTimeout(() => closeDropdown(), 250); }}>
+                    <button className="fluent-btn with-icon" onClick={() => toggleDropdown('margins', {current: dropdownRefs.current['margins'] as HTMLDivElement} as any, 220)} title="Margins">
+                      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="3" y1="15" x2="21" y2="15"/><line x1="9" y1="3" x2="9" y2="21"/><line x1="15" y1="3" x2="15" y2="21"/></svg>
+                      <span className="fluent-btn-label">Margins</span>
                     </button>
-                    {showLayout && layoutPos && (
-                      <div className={`fluent-dropdown ${layoutPos.upward ? 'open-upward' : ''}`} style={{ position: 'fixed', top: layoutPos.top, left: layoutPos.left, zIndex: 10000, minWidth: 280, maxHeight: '80vh', overflowY: 'auto' }}>
-                        <div className="fluent-dropdown-label">Page Size</div>
-                        <button className={`fluent-dropdown-item ${layoutPreset === 'a4-portrait' ? 'active' : ''}`} onClick={() => { onSetLayout('a4-portrait'); setShowLayout(false); setLayoutPos(null); }}>A4 Portrait (794×1123)</button>
-                        <button className={`fluent-dropdown-item ${layoutPreset === 'a4-landscape' ? 'active' : ''}`} onClick={() => { onSetLayout('a4-landscape'); setShowLayout(false); setLayoutPos(null); }}>A4 Landscape (1123×794)</button>
-                        <button className={`fluent-dropdown-item ${layoutPreset === 'a3-portrait' ? 'active' : ''}`} onClick={() => { onSetLayout('a3-portrait'); setShowLayout(false); setLayoutPos(null); }}>A3 Portrait (1123×1587)</button>
-                        <button className={`fluent-dropdown-item ${layoutPreset === 'a3-landscape' ? 'active' : ''}`} onClick={() => { onSetLayout('a3-landscape'); setShowLayout(false); setLayoutPos(null); }}>A3 Landscape (1587×1123)</button>
-                        <button className={`fluent-dropdown-item ${layoutPreset === 'letter' ? 'active' : ''}`} onClick={() => { onSetLayout('letter'); setShowLayout(false); setLayoutPos(null); }}>Letter (816×1056)</button>
-                        <button className={`fluent-dropdown-item ${layoutPreset === 'legal' ? 'active' : ''}`} onClick={() => { onSetLayout('legal'); setShowLayout(false); setLayoutPos(null); }}>Legal (816×1344)</button>
-                        <button className={`fluent-dropdown-item ${layoutPreset === 'tabloid' ? 'active' : ''}`} onClick={() => { onSetLayout('tabloid'); setShowLayout(false); setLayoutPos(null); }}>Tabloid (1056×1632)</button>
-                        <div className="fluent-dropdown-divider"></div>
-                        <div className="fluent-dropdown-label">Social Media</div>
-                        <button className={`fluent-dropdown-item ${layoutPreset === 'square' ? 'active' : ''}`} onClick={() => { onSetLayout('square'); setShowLayout(false); setLayoutPos(null); }}>Square (800×800)</button>
-                        <button className={`fluent-dropdown-item ${layoutPreset === 'instagram-post' ? 'active' : ''}`} onClick={() => { onSetLayout('instagram-post'); setShowLayout(false); setLayoutPos(null); }}>Instagram Post (1080×1080)</button>
-                        <button className={`fluent-dropdown-item ${layoutPreset === 'instagram-story' ? 'active' : ''}`} onClick={() => { onSetLayout('instagram-story'); setShowLayout(false); setLayoutPos(null); }}>Instagram Story (1080×1920)</button>
-                        <button className={`fluent-dropdown-item ${layoutPreset === 'facebook-post' ? 'active' : ''}`} onClick={() => { onSetLayout('facebook-post'); setShowLayout(false); setLayoutPos(null); }}>Facebook Post (1200×630)</button>
-                        <button className={`fluent-dropdown-item ${layoutPreset === 'youtube-thumbnail' ? 'active' : ''}`} onClick={() => { onSetLayout('youtube-thumbnail'); setShowLayout(false); setLayoutPos(null); }}>YouTube Thumbnail (1280×720)</button>
-                        <div className="fluent-dropdown-divider"></div>
-                        <div className="fluent-dropdown-label">Custom Size</div>
-                        <div className="fluent-dropdown-item" style={{ gap: 6, padding: '4px 12px 4px' }}>
-                          <div style={{ display: 'flex', alignItems: 'center', gap: 4, width: '100%' }}>
-                            <input type="number" className="layout-custom-input" value={customSize.w} min={1} max={9999}
-                              onChange={e => { const v = parseInt(e.target.value); if (!isNaN(v)) onSetCustomSize(v, customSize.h); }} />
-                            <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>×</span>
-                            <input type="number" className="layout-custom-input" value={customSize.h} min={1} max={9999}
-                              onChange={e => { const v = parseInt(e.target.value); if (!isNaN(v)) onSetCustomSize(customSize.w, v); }} />
-                            <button className="layout-custom-apply" onClick={() => { onSetLayout('custom'); setShowLayout(false); setLayoutPos(null); }}>Apply</button>
-                          </div>
-                        </div>
-                        <div className="fluent-dropdown-divider"></div>
-                        <div className="fluent-dropdown-label">Margins</div>
-                        {Object.entries(MARGIN_PRESETS).map(([key, m]) => (
-                          <button key={key} className={`fluent-dropdown-item ${marginPreset === key ? 'active' : ''}`} onClick={() => { onSetMargins(key); setShowLayout(false); setLayoutPos(null); }}>
-                            {key.charAt(0).toUpperCase() + key.slice(1)} ({m.t}/{m.b}×{m.l}/{m.r})
+                    {openDropdown === 'margins' && dropdownPosArr && (
+                      <div className={`fluent-dropdown ${dropdownPosArr.upward ? 'open-upward' : ''}`} style={{ position: 'fixed', top: dropdownPosArr.top, left: dropdownPosArr.left, zIndex: 10000, minWidth: 220 }}>
+                        <div className="fluent-dropdown-label">Preset Margins</div>
+                        {Object.entries(MARGIN_PRESETS).map(([key]) => (
+                          <button key={key} className={`fluent-dropdown-item ${marginPreset === key ? 'active' : ''}`} onClick={() => { onSetMargins(key); closeDropdown(); }}>
+                            {key.charAt(0).toUpperCase() + key.slice(1)}
                           </button>
                         ))}
+                        <div className="fluent-dropdown-divider"/>
+                        <button className="fluent-dropdown-item" onClick={() => { onOpenCustomMarginsDialog?.(); closeDropdown(); }}>Custom Margins...</button>
+                      </div>
+                    )}
+                  </div>
+
+                  <div ref={el => dropdownRefs.current['orientation-dd'] = el} className="fluent-dropdown-container"
+                    onMouseEnter={() => { clearHover(); if (openDropdown !== 'orientation-dd') { const p = calcPos({current: dropdownRefs.current['orientation-dd'] as HTMLDivElement} as any, 180); if (p) { setDropdownPosArr(p); setOpenDropdown('orientation-dd'); } } }}
+                    onMouseLeave={() => { hoverTimer.current = window.setTimeout(() => closeDropdown(), 250); }}>
+                    <button className="fluent-btn with-icon" onClick={() => toggleDropdown('orientation-dd', {current: dropdownRefs.current['orientation-dd'] as HTMLDivElement} as any, 180)} title="Orientation">
+                      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="2" y="6" width="20" height="12" rx="2"/><line x1="12" y1="6" x2="12" y2="18"/></svg>
+                      <span className="fluent-btn-label">Orientation</span>
+                    </button>
+                    {openDropdown === 'orientation-dd' && dropdownPosArr && (
+                      <div className={`fluent-dropdown ${dropdownPosArr.upward ? 'open-upward' : ''}`} style={{ position: 'fixed', top: dropdownPosArr.top, left: dropdownPosArr.left, zIndex: 10000, minWidth: 180 }}>
+                        <button className={`fluent-dropdown-item${orientation === 'portrait' || !orientation ? ' active' : ''}`} onClick={() => { if (orientation !== 'landscape') onToggleOrientation(); closeDropdown(); }}>Portrait</button>
+                        <button className={`fluent-dropdown-item${orientation === 'landscape' ? ' active' : ''}`} onClick={() => { if (orientation !== 'portrait') onToggleOrientation(); closeDropdown(); }}>Landscape</button>
+                      </div>
+                    )}
+                  </div>
+
+                  <div ref={el => dropdownRefs.current['size'] = el} className="fluent-dropdown-container"
+                    onMouseEnter={() => { clearHover(); if (openDropdown !== 'size') { const p = calcPos({current: dropdownRefs.current['size'] as HTMLDivElement} as any, 220); if (p) { setDropdownPosArr(p); setOpenDropdown('size'); } } }}
+                    onMouseLeave={() => { hoverTimer.current = window.setTimeout(() => closeDropdown(), 250); }}>
+                    <button className="fluent-btn with-icon" onClick={() => toggleDropdown('size', {current: dropdownRefs.current['size'] as HTMLDivElement} as any, 220)} title="Page Size">
+                      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="9" y1="3" x2="9" y2="21"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="3" y1="15" x2="21" y2="15"/><line x1="15" y1="3" x2="15" y2="21"/></svg>
+                      <span className="fluent-btn-label">Size</span>
+                    </button>
+                    {openDropdown === 'size' && dropdownPosArr && (
+                      <div className={`fluent-dropdown ${dropdownPosArr.upward ? 'open-upward' : ''}`} style={{ position: 'fixed', top: dropdownPosArr.top, left: dropdownPosArr.left, zIndex: 10000, minWidth: 220, maxHeight: '70vh', overflowY: 'auto' }}>
+                        <div className="fluent-dropdown-label">Document Pages</div>
+                        <button className={`fluent-dropdown-item ${layoutPreset === 'a4' ? 'active' : ''}`} onClick={() => { onSetLayout('a4'); closeDropdown(); }}>A4 (210 × 297 mm)</button>
+                        <button className={`fluent-dropdown-item ${layoutPreset === 'letter' ? 'active' : ''}`} onClick={() => { onSetLayout('letter'); closeDropdown(); }}>Letter (8.5 × 11 in)</button>
+                        <button className={`fluent-dropdown-item ${layoutPreset === 'legal' ? 'active' : ''}`} onClick={() => { onSetLayout('legal'); closeDropdown(); }}>Legal (8.5 × 14 in)</button>
+                        <button className={`fluent-dropdown-item ${layoutPreset === 'a3' ? 'active' : ''}`} onClick={() => { onSetLayout('a3'); closeDropdown(); }}>A3 (297 × 420 mm)</button>
+                        <button className={`fluent-dropdown-item ${layoutPreset === 'executive' ? 'active' : ''}`} onClick={() => { onSetLayout('executive'); closeDropdown(); }}>Executive (7.25 × 10.5 in)</button>
+                        <button className={`fluent-dropdown-item ${layoutPreset === 'tabloid' ? 'active' : ''}`} onClick={() => { onSetLayout('tabloid'); closeDropdown(); }}>Tabloid (11 × 17 in)</button>
+                        <div className="fluent-dropdown-divider"/>
+                        <div className="fluent-dropdown-label">Custom Size</div>
+                        <div className="fluent-dropdown-item" style={{ padding: '4px 12px' }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                            <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>W:</span>
+                            <input type="number" className="layout-custom-input" value={customSize.w} min={1} max={9999}
+                              onChange={e => { const v = parseInt(e.target.value); if (!isNaN(v)) onSetCustomSize(v, customSize.h); }} />
+                            <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>H:</span>
+                            <input type="number" className="layout-custom-input" value={customSize.h} min={1} max={9999}
+                              onChange={e => { const v = parseInt(e.target.value); if (!isNaN(v)) onSetCustomSize(customSize.w, v); }} />
+                            <button className="layout-custom-apply" onClick={() => { onSetLayout('custom'); closeDropdown(); }}>Apply</button>
+                          </div>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  <div ref={el => dropdownRefs.current['breaks'] = el} className="fluent-dropdown-container"
+                    onMouseEnter={() => { clearHover(); if (openDropdown !== 'breaks') { const p = calcPos({current: dropdownRefs.current['breaks'] as HTMLDivElement} as any, 220); if (p) { setDropdownPosArr(p); setOpenDropdown('breaks'); } } }}
+                    onMouseLeave={() => { hoverTimer.current = window.setTimeout(() => closeDropdown(), 250); }}>
+                    <button className="fluent-btn with-icon" onClick={() => toggleDropdown('breaks', {current: dropdownRefs.current['breaks'] as HTMLDivElement} as any, 220)} title="Breaks">
+                      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="6" y1="4" x2="6" y2="20"/><polyline points="10 8 6 12 10 16"/><line x1="18" y1="4" x2="18" y2="20"/><polyline points="14 8 18 12 14 16"/></svg>
+                      <span className="fluent-btn-label">Breaks</span>
+                    </button>
+                    {openDropdown === 'breaks' && dropdownPosArr && (
+                      <div className={`fluent-dropdown ${dropdownPosArr.upward ? 'open-upward' : ''}`} style={{ position: 'fixed', top: dropdownPosArr.top, left: dropdownPosArr.left, zIndex: 10000, minWidth: 220 }}>
+                        <div className="fluent-dropdown-label">Page Breaks</div>
+                        <button className="fluent-dropdown-item" onClick={() => { onInsertBreak?.('page'); closeDropdown(); }}>Page</button>
+                        <button className="fluent-dropdown-item" onClick={() => { onInsertBreak?.('column'); closeDropdown(); }}>Column</button>
+                        <div className="fluent-dropdown-divider"/>
+                        <div className="fluent-dropdown-label">Section Breaks</div>
+                        <button className="fluent-dropdown-item" onClick={() => { onInsertBreak?.('section-next'); closeDropdown(); }}>Next Page</button>
+                        <button className="fluent-dropdown-item" onClick={() => { onInsertBreak?.('continuous'); closeDropdown(); }}>Continuous</button>
+                        <button className="fluent-dropdown-item" onClick={() => { onInsertBreak?.('odd'); closeDropdown(); }}>Odd Page</button>
+                        <button className="fluent-dropdown-item" onClick={() => { onInsertBreak?.('even'); closeDropdown(); }}>Even Page</button>
+                      </div>
+                    )}
+                  </div>
+
+                  <div ref={el => dropdownRefs.current['lineNumbers'] = el} className="fluent-dropdown-container"
+                    onMouseEnter={() => { clearHover(); if (openDropdown !== 'lineNumbers') { const p = calcPos({current: dropdownRefs.current['lineNumbers'] as HTMLDivElement} as any, 200); if (p) { setDropdownPosArr(p); setOpenDropdown('lineNumbers'); } } }}
+                    onMouseLeave={() => { hoverTimer.current = window.setTimeout(() => closeDropdown(), 250); }}>
+                    <button className="fluent-btn with-icon" onClick={() => toggleDropdown('lineNumbers', {current: dropdownRefs.current['lineNumbers'] as HTMLDivElement} as any, 200)} title="Line Numbers">
+                      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/></svg>
+                      <span className="fluent-btn-label">Line #</span>
+                    </button>
+                    {openDropdown === 'lineNumbers' && dropdownPosArr && (
+                      <div className={`fluent-dropdown ${dropdownPosArr.upward ? 'open-upward' : ''}`} style={{ position: 'fixed', top: dropdownPosArr.top, left: dropdownPosArr.left, zIndex: 10000, minWidth: 200 }}>
+                        <button className={`fluent-dropdown-item ${lineNumbersMode === 'none' || !lineNumbersMode ? 'active' : ''}`} onClick={() => { onSetLineNumbers?.('none'); closeDropdown(); }}>None</button>
+                        <button className={`fluent-dropdown-item ${lineNumbersMode === 'continuous' ? 'active' : ''}`} onClick={() => { onSetLineNumbers?.('continuous'); closeDropdown(); }}>Continuous</button>
+                        <button className={`fluent-dropdown-item ${lineNumbersMode === 'restart-page' ? 'active' : ''}`} onClick={() => { onSetLineNumbers?.('restart-page'); closeDropdown(); }}>Restart Each Page</button>
+                        <button className={`fluent-dropdown-item ${lineNumbersMode === 'restart-section' ? 'active' : ''}`} onClick={() => { onSetLineNumbers?.('restart-section'); closeDropdown(); }}>Restart Each Section</button>
+                      </div>
+                    )}
+                  </div>
+
+                  <div ref={el => dropdownRefs.current['hyphenation'] = el} className="fluent-dropdown-container"
+                    onMouseEnter={() => { clearHover(); if (openDropdown !== 'hyphenation') { const p = calcPos({current: dropdownRefs.current['hyphenation'] as HTMLDivElement} as any, 180); if (p) { setDropdownPosArr(p); setOpenDropdown('hyphenation'); } } }}
+                    onMouseLeave={() => { hoverTimer.current = window.setTimeout(() => closeDropdown(), 250); }}>
+                    <button className="fluent-btn with-icon" onClick={() => toggleDropdown('hyphenation', {current: dropdownRefs.current['hyphenation'] as HTMLDivElement} as any, 180)} title="Hyphenation">
+                      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="8" x2="6" y2="8"/><line x1="18" y1="8" x2="21" y2="8"/></svg>
+                      <span className="fluent-btn-label">Hyphenation</span>
+                    </button>
+                    {openDropdown === 'hyphenation' && dropdownPosArr && (
+                      <div className={`fluent-dropdown ${dropdownPosArr.upward ? 'open-upward' : ''}`} style={{ position: 'fixed', top: dropdownPosArr.top, left: dropdownPosArr.left, zIndex: 10000, minWidth: 180 }}>
+                        <button className={`fluent-dropdown-item ${hyphenationMode === 'none' || !hyphenationMode ? 'active' : ''}`} onClick={() => { onSetHyphenation?.('none'); closeDropdown(); }}>None</button>
+                        <button className={`fluent-dropdown-item ${hyphenationMode === 'automatic' ? 'active' : ''}`} onClick={() => { onSetHyphenation?.('automatic'); closeDropdown(); }}>Automatic</button>
+                        <button className={`fluent-dropdown-item ${hyphenationMode === 'manual' ? 'active' : ''}`} onClick={() => { onSetHyphenation?.('manual'); closeDropdown(); }}>Manual</button>
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="fluent-color-btn" title="Page Background Color" style={{ marginTop: 2 }}>
+                    <span style={{ fontSize: 9, fontWeight: 600, color: 'var(--text-secondary)' }}>BG</span>
+                    <input type="color" className="fluent-color-swatch" value={pageBackgroundColor} onChange={e => onSetPageBackground(e.target.value)} />
+                  </div>
+                </div>
+                <div className="fluent-group-label">Page Setup</div>
+              </div>
+              <div className="fluent-divider" />
+
+              <div className="fluent-group">
+                <div className="fluent-group-items" style={{ gap: 2, flexDirection: 'column', alignItems: 'stretch', padding: '4px 8px' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 2 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
+                      <span style={{ fontSize: 11, color: 'var(--text-secondary)', minWidth: 26 }}>Left:</span>
+                      <div style={{ position: 'relative' }}>
+                        <input type="number" className="indent-spacing-input" defaultValue={0} min={0} max={100} step={0.1} />
+                        <div className="spinner-arrows"><button tabIndex={-1}>▲</button><button tabIndex={-1}>▼</button></div>
+                      </div>
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
+                      <span style={{ fontSize: 11, color: 'var(--text-secondary)', minWidth: 26 }}>Right:</span>
+                      <div style={{ position: 'relative' }}>
+                        <input type="number" className="indent-spacing-input" defaultValue={0} min={0} max={100} step={0.1} />
+                        <div className="spinner-arrows"><button tabIndex={-1}>▲</button><button tabIndex={-1}>▼</button></div>
+                      </div>
+                    </div>
+                  </div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
+                      <span style={{ fontSize: 11, color: 'var(--text-secondary)', minWidth: 36 }}>Before:</span>
+                      <div style={{ position: 'relative' }}>
+                        <input type="number" className="indent-spacing-input" defaultValue={0} min={0} max={100} step={6} />
+                        <div className="spinner-arrows"><button tabIndex={-1}>▲</button><button tabIndex={-1}>▼</button></div>
+                      </div>
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
+                      <span style={{ fontSize: 11, color: 'var(--text-secondary)', minWidth: 32 }}>After:</span>
+                      <div style={{ position: 'relative' }}>
+                        <input type="number" className="indent-spacing-input" defaultValue={0} min={0} max={100} step={6} />
+                        <div className="spinner-arrows"><button tabIndex={-1}>▲</button><button tabIndex={-1}>▼</button></div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                <div className="fluent-group-label">Paragraph</div>
+              </div>
+              <div className="fluent-divider" />
+
+              <div className="fluent-group">
+                <div className="fluent-group-items">
+                  <div ref={el => dropdownRefs.current['position'] = el} className="fluent-dropdown-container">
+                    <button className={`fluent-btn with-icon${!hasArrangeSelection ? ' disabled' : ''}`} onClick={hasArrangeSelection ? () => toggleDropdown('position', {current: dropdownRefs.current['position'] as HTMLDivElement} as any, 200) : undefined} title="Position" disabled={!hasArrangeSelection}>
+                      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M5 3v18M19 3v18M3 5h18M3 19h18"/><circle cx="12" cy="12" r="3"/></svg>
+                      <span className="fluent-btn-label">Position</span>
+                    </button>
+                    {openDropdown === 'position' && hasArrangeSelection && dropdownPosArr && (
+                      <div className={`fluent-dropdown ${dropdownPosArr.upward ? 'open-upward' : ''}`} style={{ position: 'fixed', top: dropdownPosArr.top, left: dropdownPosArr.left, zIndex: 10000, minWidth: 200 }}>
+                        <button className="fluent-dropdown-item" onClick={() => { onAlign?.('left'); closeDropdown(); }}>Align Left</button>
+                        <button className="fluent-dropdown-item" onClick={() => { onAlign?.('center'); closeDropdown(); }}>Align Center</button>
+                        <button className="fluent-dropdown-item" onClick={() => { onAlign?.('right'); closeDropdown(); }}>Align Right</button>
+                        <div className="fluent-dropdown-divider"/>
+                        <button className="fluent-dropdown-item" onClick={() => { onAlign?.('top'); closeDropdown(); }}>Align Top</button>
+                        <button className="fluent-dropdown-item" onClick={() => { onAlign?.('middle'); closeDropdown(); }}>Align Middle</button>
+                        <button className="fluent-dropdown-item" onClick={() => { onAlign?.('bottom'); closeDropdown(); }}>Align Bottom</button>
+                      </div>
+                    )}
+                  </div>
+
+                  <div ref={el => dropdownRefs.current['wrapText'] = el} className="fluent-dropdown-container"
+                    onMouseEnter={() => { clearHover(); if (hasArrangeSelection && openDropdown !== 'wrapText') { const p = calcPos({current: dropdownRefs.current['wrapText'] as HTMLDivElement} as any, 180); if (p) { setDropdownPosArr(p); setOpenDropdown('wrapText'); } } }}
+                    onMouseLeave={() => { hoverTimer.current = window.setTimeout(() => closeDropdown(), 250); }}>
+                    <button className={`fluent-btn with-icon${!hasArrangeSelection ? ' disabled' : ''}`} onClick={hasArrangeSelection ? () => toggleDropdown('wrapText', {current: dropdownRefs.current['wrapText'] as HTMLDivElement} as any, 180) : undefined} title="Wrap Text" disabled={!hasArrangeSelection}>
+                      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M4 7h16M4 12h10M4 17h6"/><path d="M17 17l3-3-3-3"/></svg>
+                      <span className="fluent-btn-label">Wrap Text</span>
+                    </button>
+                    {openDropdown === 'wrapText' && hasArrangeSelection && dropdownPosArr && (
+                      <div className={`fluent-dropdown ${dropdownPosArr.upward ? 'open-upward' : ''}`} style={{ position: 'fixed', top: dropdownPosArr.top, left: dropdownPosArr.left, zIndex: 10000, minWidth: 180 }}>
+                        <button className="fluent-dropdown-item" onClick={() => { onImageWrap?.('inline'); closeDropdown(); }}>In Line with Text</button>
+                        <button className="fluent-dropdown-item" onClick={() => { onImageWrap?.('square'); closeDropdown(); }}>Square</button>
+                        <button className="fluent-dropdown-item" onClick={() => { onImageWrap?.('tight'); closeDropdown(); }}>Tight</button>
+                        <div className="fluent-dropdown-divider"/>
+                        <button className="fluent-dropdown-item" onClick={() => { onImageWrap?.('behind'); closeDropdown(); }}>Behind Text</button>
+                        <button className="fluent-dropdown-item" onClick={() => { onImageWrap?.('front'); closeDropdown(); }}>In Front of Text</button>
+                      </div>
+                    )}
+                  </div>
+
+                  <button className={`fluent-btn with-icon${!hasArrangeSelection ? ' disabled' : ''}`} onClick={hasArrangeSelection ? onBringForward : undefined} title="Bring Forward" disabled={!hasArrangeSelection}>
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="17 15 12 20 7 15"/><path d="M12 4v16"/></svg>
+                    <span className="fluent-btn-label">Bring Forward</span>
+                  </button>
+
+                  <button className={`fluent-btn with-icon${!hasArrangeSelection ? ' disabled' : ''}`} onClick={hasArrangeSelection ? onSendBackward : undefined} title="Send Backward" disabled={!hasArrangeSelection}>
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="7 9 12 4 17 9"/><path d="M12 20V4"/></svg>
+                    <span className="fluent-btn-label">Send Backward</span>
+                  </button>
+
+                  <button className="fluent-btn with-icon" onClick={onToggleSelectionPane} title="Selection Pane">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="9" y1="3" x2="9" y2="21"/></svg>
+                    <span className="fluent-btn-label">Selection Pane</span>
+                  </button>
+
+                  <div ref={el => dropdownRefs.current['align'] = el} className="fluent-dropdown-container"
+                    onMouseEnter={() => { clearHover(); if (hasArrangeSelection && openDropdown !== 'align') { const p = calcPos({current: dropdownRefs.current['align'] as HTMLDivElement} as any, 180); if (p) { setDropdownPosArr(p); setOpenDropdown('align'); } } }}
+                    onMouseLeave={() => { hoverTimer.current = window.setTimeout(() => closeDropdown(), 250); }}>
+                    <button className={`fluent-btn with-icon${!hasArrangeSelection ? ' disabled' : ''}`} onClick={hasArrangeSelection ? () => toggleDropdown('align', {current: dropdownRefs.current['align'] as HTMLDivElement} as any, 180) : undefined} title="Align" disabled={!hasArrangeSelection}>
+                      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="3" y1="3" x2="21" y2="3"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="3" y1="15" x2="21" y2="15"/><line x1="3" y1="21" x2="21" y2="21"/></svg>
+                      <span className="fluent-btn-label">Align</span>
+                    </button>
+                    {openDropdown === 'align' && hasArrangeSelection && dropdownPosArr && (
+                      <div className={`fluent-dropdown ${dropdownPosArr.upward ? 'open-upward' : ''}`} style={{ position: 'fixed', top: dropdownPosArr.top, left: dropdownPosArr.left, zIndex: 10000, minWidth: 180 }}>
+                        <button className="fluent-dropdown-item" onClick={() => { onAlign?.('left'); closeDropdown(); }}>Align Left</button>
+                        <button className="fluent-dropdown-item" onClick={() => { onAlign?.('center'); closeDropdown(); }}>Align Center</button>
+                        <button className="fluent-dropdown-item" onClick={() => { onAlign?.('right'); closeDropdown(); }}>Align Right</button>
+                        <div className="fluent-dropdown-divider"/>
+                        <button className="fluent-dropdown-item" onClick={() => { onAlign?.('top'); closeDropdown(); }}>Align Top</button>
+                        <button className="fluent-dropdown-item" onClick={() => { onAlign?.('middle'); closeDropdown(); }}>Align Middle</button>
+                        <button className="fluent-dropdown-item" onClick={() => { onAlign?.('bottom'); closeDropdown(); }}>Align Bottom</button>
+                      </div>
+                    )}
+                  </div>
+
+                  <div ref={el => dropdownRefs.current['group-dd'] = el} className="fluent-dropdown-container"
+                    onMouseEnter={() => { clearHover(); if (hasArrangeSelection && openDropdown !== 'group-dd') { const p = calcPos({current: dropdownRefs.current['group-dd'] as HTMLDivElement} as any, 160); if (p) { setDropdownPosArr(p); setOpenDropdown('group-dd'); } } }}
+                    onMouseLeave={() => { hoverTimer.current = window.setTimeout(() => closeDropdown(), 250); }}>
+                    <button className={`fluent-btn with-icon${!hasArrangeSelection ? ' disabled' : ''}`} onClick={hasArrangeSelection ? () => toggleDropdown('group-dd', {current: dropdownRefs.current['group-dd'] as HTMLDivElement} as any, 160) : undefined} title="Group" disabled={!hasArrangeSelection}>
+                      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
+                      <span className="fluent-btn-label">Group</span>
+                    </button>
+                    {openDropdown === 'group-dd' && hasArrangeSelection && dropdownPosArr && (
+                      <div className={`fluent-dropdown ${dropdownPosArr.upward ? 'open-upward' : ''}`} style={{ position: 'fixed', top: dropdownPosArr.top, left: dropdownPosArr.left, zIndex: 10000, minWidth: 160 }}>
+                        <button className="fluent-dropdown-item" onClick={() => { onGroup?.(); closeDropdown(); }}>Group</button>
+                        <button className="fluent-dropdown-item" onClick={() => { onUngroup?.(); closeDropdown(); }}>Ungroup</button>
+                      </div>
+                    )}
+                  </div>
+
+                  <div ref={el => dropdownRefs.current['rotate'] = el} className="fluent-dropdown-container"
+                    onMouseEnter={() => { clearHover(); if (hasArrangeSelection && openDropdown !== 'rotate') { const p = calcPos({current: dropdownRefs.current['rotate'] as HTMLDivElement} as any, 180); if (p) { setDropdownPosArr(p); setOpenDropdown('rotate'); } } }}
+                    onMouseLeave={() => { hoverTimer.current = window.setTimeout(() => closeDropdown(), 250); }}>
+                    <button className={`fluent-btn with-icon${!hasArrangeSelection ? ' disabled' : ''}`} onClick={hasArrangeSelection ? () => toggleDropdown('rotate', {current: dropdownRefs.current['rotate'] as HTMLDivElement} as any, 180) : undefined} title="Rotate" disabled={!hasArrangeSelection}>
+                      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+                      <span className="fluent-btn-label">Rotate</span>
+                    </button>
+                    {openDropdown === 'rotate' && hasArrangeSelection && dropdownPosArr && (
+                      <div className={`fluent-dropdown ${dropdownPosArr.upward ? 'open-upward' : ''}`} style={{ position: 'fixed', top: dropdownPosArr.top, left: dropdownPosArr.left, zIndex: 10000, minWidth: 180 }}>
+                        <button className="fluent-dropdown-item" onClick={() => { onRotate?.(); closeDropdown(); }}>Rotate Right 90°</button>
+                        <button className="fluent-dropdown-item" onClick={() => { onRotateLeft?.(); closeDropdown(); }}>Rotate Left 90°</button>
+                        <button className="fluent-dropdown-item" onClick={() => { onFlipH?.(); closeDropdown(); }}>Flip Horizontal</button>
+                        <button className="fluent-dropdown-item" onClick={() => { onFlipV?.(); closeDropdown(); }}>Flip Vertical</button>
                       </div>
                     )}
                   </div>
                 </div>
-                <div className="fluent-group-label">Layout</div>
+                <div className="fluent-group-label">Arrange</div>
               </div>
-              <div className="fluent-divider" />
-              <div className="fluent-group">
-                <div className="fluent-group-items">
-                  <div className="fluent-color-btn" title="Page Background Color">
-                    <span style={{ fontSize: 10, fontWeight: 600, color: 'var(--text-secondary)' }}>BG</span>
-                    <input type="color" className="fluent-color-swatch" value={pageBackgroundColor} onChange={e => onSetPageBackground(e.target.value)} />
-                  </div>
-                </div>
-                <div className="fluent-group-label">Page Background</div>
-              </div>
-              <div className="fluent-divider" />
-              <div className="fluent-group">
-                <div className="fluent-group-items">
-                  <button className="fluent-btn with-icon" onClick={() => onSetColumns(1)} title="1 Column">
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"></rect></svg>
-                    <span className="fluent-btn-label">1</span>
-                  </button>
-                  <button className="fluent-btn with-icon" onClick={() => onSetColumns(2)} title="2 Columns">
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="7" height="18" rx="1"></rect><rect x="14" y="3" width="7" height="18" rx="1"></rect></svg>
-                    <span className="fluent-btn-label">2</span>
-                  </button>
-                  <button className="fluent-btn with-icon" onClick={() => onSetColumns(3)} title="3 Columns">
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="2" y="3" width="5" height="18" rx="1"></rect><rect x="9.5" y="3" width="5" height="18" rx="1"></rect><rect x="17" y="3" width="5" height="18" rx="1"></rect></svg>
-                    <span className="fluent-btn-label">3</span>
-                  </button>
-                </div>
-                <div className="fluent-group-label">Columns</div>
-              </div>
-              <div className="fluent-divider" />
-              <div className="fluent-group">
-                <div className="fluent-group-items">
-                  <button className="fluent-btn with-icon" onClick={onToggleOrientation} title="Toggle Orientation">
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                      <rect x="2" y="6" width="20" height="12" rx="2"></rect>
-                      <line x1="12" y1="6" x2="12" y2="18"></line>
-                    </svg>
-                    <span className="fluent-btn-label">Orientation</span>
-                  </button>
-                  <button className="fluent-btn with-icon" onClick={onTogglePageBorder} title="Toggle Page Border">
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><line x1="3" y1="9" x2="21" y2="9"></line><line x1="3" y1="15" x2="21" y2="15"></line><line x1="9" y1="3" x2="9" y2="21"></line><line x1="15" y1="3" x2="15" y2="21"></line></svg>
-                    <span className="fluent-btn-label">Page Border</span>
-                  </button>
-                </div>
-                <div className="fluent-group-label">Layout</div>
-              </div>
-
-              {isShapeSelected && (
-                <>
-                  <div className="fluent-divider" />
-                  <div className="fluent-group">
-                    <div className="fluent-group-items">
-                      <div className="fluent-color-btn" title="Shape Fill Color">
-                        <span style={{ fontSize: 10, fontWeight: 600, color: 'var(--text-secondary)' }}>Fill</span>
-                        <input type="color" className="fluent-color-swatch" value={currentShapeColor} onChange={e => onShapeColorChange(e.target.value)} />
-                      </div>
-                      <div className="fluent-color-btn" title="Shape Gradient Fill">
-                        <span style={{ fontSize: 10, fontWeight: 600, color: 'var(--text-secondary)' }}>Grad</span>
-                        <input type="color" className="fluent-color-swatch" value="#3b82f6" onChange={e => onShapeGradient(e.target.value, '#000000')} style={{ width: 18, height: 18 }} />
-                        <input type="color" className="fluent-color-swatch" value="#000000" onChange={e => onShapeGradient('#3b82f6', e.target.value)} style={{ width: 18, height: 18 }} />
-                      </div>
-                    </div>
-                    <div className="fluent-group-label">Shape Fill</div>
-                  </div>
-                </>
-              )}
-
-              {isImageSelected && (
-                <>
-                  <div className="fluent-divider" />
-                  <div className="fluent-group">
-                    <div className="fluent-group-items">
-                      <div ref={imageDropdownRef} className="fluent-dropdown-container"
-                        onMouseEnter={() => { clearHover(); if (!showImageDropdown) { const p = calcPos(imageDropdownRef, 200); if (p) { setImageDropdownPos(p); setShowImageDropdown(true); } } }}
-                        onMouseLeave={() => { hoverTimer.current = window.setTimeout(() => { setShowImageDropdown(false); setImageDropdownPos(null); }, 250); }}>
-                        <button className="fluent-btn with-icon" onClick={() => {
-                          if (showImageDropdown) { setShowImageDropdown(false); setImageDropdownPos(null); }
-                          else { const p = calcPos(imageDropdownRef, 200); if (p) { setImageDropdownPos(p); setShowImageDropdown(true); } }
-                        }} title="Image Tools">
-                          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><circle cx="8.5" cy="8.5" r="1.5"></circle><polyline points="21 15 16 10 5 21"></polyline></svg>
-                          <span className="fluent-btn-label">Image Tools</span>
-                        </button>
-                        {showImageDropdown && imageDropdownPos && (
-                          <div className={`fluent-dropdown ${imageDropdownPos.upward ? 'open-upward' : ''}`} style={{ position: 'fixed', top: imageDropdownPos.top, left: imageDropdownPos.left, zIndex: 10000, minWidth: 200 }}>
-                            <button className="fluent-dropdown-item" onClick={() => { onCrop(); setShowImageDropdown(false); setImageDropdownPos(null); }}>
-                              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M6.13 1L6 16a2 2 0 0 0 2 2h15" /><path d="M1 6.13L16 6a2 2 0 0 1 2 2v15" /></svg>
-                              Crop
-                            </button>
-                            <button className="fluent-dropdown-item" onClick={() => { onReplaceImage(); setShowImageDropdown(false); setImageDropdownPos(null); }}>
-                              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="23 4 23 10 17 10" /><polyline points="1 20 1 14 7 14" /><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" /></svg>
-                              Replace
-                            </button>
-                            <div className="fluent-dropdown-divider"></div>
-                            <button className="fluent-dropdown-item" onClick={() => { onRotateLeft(); setShowImageDropdown(false); setImageDropdownPos(null); }}>
-                              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="3 9 9 9 9 15" /><path d="M21 12a9 9 0 1 1-6.22-8.49" /></svg>
-                              Rotate Left
-                            </button>
-                            <button className="fluent-dropdown-item" onClick={() => { onRotateRight(); setShowImageDropdown(false); setImageDropdownPos(null); }}>
-                              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="21 9 15 9 15 15" /><path d="M3 12a9 9 0 0 1 8.28-5.9" /></svg>
-                              Rotate Right
-                            </button>
-                            <div className="fluent-dropdown-divider"></div>
-                            <button className="fluent-dropdown-item" onClick={() => { onFlipH(); setShowImageDropdown(false); setImageDropdownPos(null); }}>Flip Horizontal</button>
-                            <button className="fluent-dropdown-item" onClick={() => { onFlipV(); setShowImageDropdown(false); setImageDropdownPos(null); }}>Flip Vertical</button>
-                            <div className="fluent-dropdown-divider"></div>
-                            <div className="fluent-dropdown-label">Filters</div>
-                            {filters.map(f => (
-                              <button key={f.id} className={`fluent-dropdown-item${currentFilter === f.id ? ' active' : ''}`} onClick={() => { onApplyFilter(f.id); setShowImageDropdown(false); setImageDropdownPos(null); }}>
-                                {f.label}
-                              </button>
-                            ))}
-                          </div>
-                        )}
-                      </div>
-
-                      <div ref={aspectRatioRef} className="fluent-dropdown-container"
-                        onMouseEnter={() => { clearHover(); if (!showAspectRatio) { const p = calcPos(aspectRatioRef, 140); if (p) { setAspectRatioPos(p); setShowAspectRatio(true); } } }}
-                        onMouseLeave={() => { hoverTimer.current = window.setTimeout(() => { setShowAspectRatio(false); setAspectRatioPos(null); }, 250); }}>
-                        <button className="fluent-btn with-icon" onClick={() => {
-                          if (showAspectRatio) { setShowAspectRatio(false); setAspectRatioPos(null); }
-                          else { const p = calcPos(aspectRatioRef, 140); if (p) { setAspectRatioPos(p); setShowAspectRatio(true); } }
-                        }} title="Aspect Ratio">
-                          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" /></svg>
-                          <span className="fluent-btn-label">Ratio</span>
-                        </button>
-                        {showAspectRatio && aspectRatioPos && (
-                          <div className={`fluent-dropdown ${aspectRatioPos.upward ? 'open-upward' : ''}`} style={{ position: 'fixed', top: aspectRatioPos.top, left: aspectRatioPos.left, zIndex: 10000, minWidth: 140 }}>
-                            <button className="fluent-dropdown-item" onClick={() => { onSetAspectRatio('original'); setShowAspectRatio(false); setAspectRatioPos(null); }}>Original</button>
-                            <button className="fluent-dropdown-item" onClick={() => { onSetAspectRatio('1:1'); setShowAspectRatio(false); setAspectRatioPos(null); }}>1:1</button>
-                            <button className="fluent-dropdown-item" onClick={() => { onSetAspectRatio('4:3'); setShowAspectRatio(false); setAspectRatioPos(null); }}>4:3</button>
-                            <button className="fluent-dropdown-item" onClick={() => { onSetAspectRatio('3:2'); setShowAspectRatio(false); setAspectRatioPos(null); }}>3:2</button>
-                            <button className="fluent-dropdown-item" onClick={() => { onSetAspectRatio('16:9'); setShowAspectRatio(false); setAspectRatioPos(null); }}>16:9</button>
-                            <button className="fluent-dropdown-item" onClick={() => { onSetAspectRatio('9:16'); setShowAspectRatio(false); setAspectRatioPos(null); }}>9:16</button>
-                            <button className="fluent-dropdown-item" onClick={() => { onSetAspectRatio('21:9'); setShowAspectRatio(false); setAspectRatioPos(null); }}>21:9</button>
-                          </div>
-                        )}
-                      </div>
-
-                      <div className="fluent-color-btn" title="Image Transparency" style={{ flexDirection: 'column', alignItems: 'flex-start', gap: 2 }}>
-                        <span style={{ fontSize: 10, fontWeight: 600, color: 'var(--text-secondary)' }}>Opacity</span>
-                        <input type="range" min={0} max={100} value={imageTransparency} onChange={e => onImageTransparency(parseInt(e.target.value))} style={{ width: 60, height: 4, cursor: 'pointer' }} />
-                      </div>
-
-                      <div className="fluent-color-btn" title="Image Border" style={{ flexDirection: 'column', alignItems: 'flex-start', gap: 2 }}>
-                        <span style={{ fontSize: 10, fontWeight: 600, color: 'var(--text-secondary)' }}>Border</span>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
-                          <input type="color" className="fluent-color-swatch" value="#000000" onChange={e => onImageBorder(e.target.value, 2)} style={{ width: 20, height: 20 }} />
-                          <input type="number" min={0} max={20} value={2} onChange={e => onImageBorder('#000000', parseInt(e.target.value) || 0)} style={{ width: 28, height: 20, fontSize: 10, border: '1px solid var(--border-color)', borderRadius: 3, textAlign: 'center', background: 'var(--bg-secondary)', color: 'var(--text-primary)', fontFamily: 'inherit' }} />
-                        </div>
-                      </div>
-
-                      <button className={`fluent-icon-btn${imageShadowEnabled ? ' active' : ''}`} onClick={() => onImageShadow(!imageShadowEnabled)} title="Toggle Image Shadow">
-                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                          <path d="M12 3a6 6 0 0 0 0 12 6 6 0 0 0 0-12z"/><path d="M12 15v6"/><path d="M8 21h8"/>
-                        </svg>
-                      </button>
-                      <div ref={wrapRef} className="fluent-dropdown-container"
-                        onMouseEnter={() => { clearHover(); if (!showWrap) { const p = calcPos(wrapRef, 160); if (p) { setWrapPos(p); setShowWrap(true); } } }}
-                        onMouseLeave={() => { hoverTimer.current = window.setTimeout(() => { setShowWrap(false); setWrapPos(null); }, 250); }}>
-                        <button className="fluent-btn with-icon" onClick={() => {
-                          if (showWrap) { setShowWrap(false); setWrapPos(null); }
-                          else { const p = calcPos(wrapRef, 160); if (p) { setWrapPos(p); setShowWrap(true); } }
-                        }} title="Wrap Text">
-                          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M4 7h16M4 12h10M4 17h6"/><path d="M17 17l3-3-3-3"/></svg>
-                          <span className="fluent-btn-label">Wrap</span>
-                        </button>
-                        {showWrap && wrapPos && (
-                          <div className={`fluent-dropdown ${wrapPos.upward ? 'open-upward' : ''}`} style={{ position: 'fixed', top: wrapPos.top, left: wrapPos.left, zIndex: 10000, minWidth: 160 }}>
-                            <button className="fluent-dropdown-item" onClick={() => { onImageWrap('inline'); setShowWrap(false); setWrapPos(null); }}>In Line</button>
-                            <button className="fluent-dropdown-item" onClick={() => { onImageWrap('square'); setShowWrap(false); setWrapPos(null); }}>Square</button>
-                            <button className="fluent-dropdown-item" onClick={() => { onImageWrap('tight'); setShowWrap(false); setWrapPos(null); }}>Tight</button>
-                            <div className="fluent-dropdown-divider"></div>
-                            <button className="fluent-dropdown-item" onClick={() => { onImageWrap('behind'); setShowWrap(false); setWrapPos(null); }}>Behind Text</button>
-                            <button className="fluent-dropdown-item" onClick={() => { onImageWrap('front'); setShowWrap(false); setWrapPos(null); }}>In Front of Text</button>
-                          </div>
-                        )}
-                      </div>
-                    </div>
-                    <div className="fluent-group-label">Image Tools</div>
-                  </div>
-                </>
-              )}
             </>
           )}
 
