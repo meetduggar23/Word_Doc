@@ -1,4 +1,4 @@
-# Word doc - Free & Open Source convert them into another format 
+# Word Doc - Free & Open Source convert them into another format 
 
 A modern, lightweight, and **completely free** web-based image editor built with React, TypeScript, and Fabric.js. Create, edit, and export your designs with ease!
 
