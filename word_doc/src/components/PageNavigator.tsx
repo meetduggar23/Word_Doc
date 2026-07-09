@@ -11,7 +11,7 @@ interface PageNavigatorProps {
 }
 
 const PageNavigator: React.FC<PageNavigatorProps> = ({
-  pages, activePageIndex, onSelectPage, onAddPage, onDeletePage, onDuplicatePage,
+  pages, activePageIndex, onSelectPage, onAddPage, onDeletePage, onDuplicatePage, onReorderPage,
 }) => {
   return (
     <div className="page-navigator">
@@ -47,6 +47,26 @@ const PageNavigator: React.FC<PageNavigatorProps> = ({
               <span className="page-navigator-label">{page.name}</span>
             </div>
             <div className="page-navigator-actions">
+              <button
+                className="page-navigator-action-btn"
+                onClick={e => { e.stopPropagation(); onReorderPage(index, index - 1); }}
+                title="Move Up"
+                disabled={index === 0}
+              >
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <polyline points="18 15 12 9 6 15"></polyline>
+                </svg>
+              </button>
+              <button
+                className="page-navigator-action-btn"
+                onClick={e => { e.stopPropagation(); onReorderPage(index, index + 1); }}
+                title="Move Down"
+                disabled={index === pages.length - 1}
+              >
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <polyline points="6 9 12 15 18 9"></polyline>
+                </svg>
+              </button>
               <button
                 className="page-navigator-action-btn"
                 onClick={e => { e.stopPropagation(); onDuplicatePage(index); }}

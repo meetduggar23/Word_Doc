@@ -728,6 +728,152 @@ body {
   to { opacity: 1; transform: translateX(0); }
 }
 
+/* ===== Right-Click Mini Formatting Toolbar - Word 365 Style ===== */
+.rightclick-toolbar {
+  position: fixed;
+  z-index: 10001;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 4px 8px;
+  background: #ffffff;
+  border: 1px solid rgba(0,0,0,0.1);
+  border-radius: 12px;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.12), 0 2px 8px rgba(0,0,0,0.06);
+  animation: toolbarFadeIn 0.12s cubic-bezier(0.2, 0, 0, 1);
+  height: 42px;
+  transform-origin: bottom left;
+  white-space: nowrap;
+  user-select: none;
+}
+
+@keyframes toolbarFadeIn {
+  from { opacity: 0; transform: scale(0.96) translateY(6px); }
+  to { opacity: 1; transform: scale(1) translateY(0); }
+}
+
+.rightclick-toolbar-divider {
+  width: 1px;
+  height: 22px;
+  background: #e6e6e6;
+  margin: 0 3px;
+  flex-shrink: 0;
+}
+
+.rightclick-toolbar-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border: none;
+  background: transparent;
+  border-radius: 5px;
+  cursor: pointer;
+  color: #444;
+  font-size: 14px;
+  transition: background 0.08s ease;
+  flex-shrink: 0;
+  padding: 0;
+}
+
+.rightclick-toolbar-btn:hover {
+  background: #e8ecf0;
+}
+
+.rightclick-toolbar-btn.active {
+  background: #e3e9f7;
+  color: #1a1a2e;
+}
+
+.rightclick-toolbar-btn svg {
+  width: 16px;
+  height: 16px;
+  display: block;
+}
+
+.rightclick-toolbar-select {
+  padding: 2px 6px;
+  height: 28px;
+  border: 1px solid #e0e0e0;
+  border-radius: 5px;
+  font-size: 12px;
+  font-family: inherit;
+  color: #1a1a2e;
+  background: #ffffff;
+  cursor: pointer;
+  outline: none;
+  transition: border-color 0.15s;
+  min-width: 0;
+  max-width: 100px;
+}
+
+.rightclick-toolbar-select:hover {
+  border-color: #c0c0c0;
+}
+
+.rightclick-toolbar-select:focus {
+  border-color: #4a6cf7;
+}
+
+.rightclick-toolbar-color-btn {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border: none;
+  background: transparent;
+  border-radius: 5px;
+  cursor: pointer;
+  transition: background 0.08s ease;
+  flex-shrink: 0;
+  padding: 0;
+}
+
+.rightclick-toolbar-color-btn:hover {
+  background: #e8ecf0;
+}
+
+.rightclick-toolbar-color-swatch {
+  width: 16px;
+  height: 16px;
+  border-radius: 3px;
+  border: 1px solid rgba(0,0,0,0.15);
+  display: block;
+}
+
+.rightclick-toolbar-color-picker {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  margin-top: 4px;
+  width: 140px;
+  padding: 6px;
+  background: #fff;
+  border: 1px solid rgba(0,0,0,0.1);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.12);
+  z-index: 10002;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px;
+}
+
+.rightclick-toolbar-color-swatch-option {
+  width: 22px;
+  height: 22px;
+  border-radius: 4px;
+  border: 1px solid rgba(0,0,0,0.1);
+  cursor: pointer;
+  transition: transform 0.08s ease;
+}
+
+.rightclick-toolbar-color-swatch-option:hover {
+  transform: scale(1.15);
+}
+
 /* ===== Dropdown Base Styles ===== */
 .toolbar-dropdown-container {
   position: static;
@@ -3873,7 +4019,89 @@ body {
 
 @keyframes logoFloat {
   0%, 100% { transform: translateY(0); }
-  50% { transform: translateY(-4px); }
+  50% { transform: translateY(-6px); }
+}
+
+/* ===== PRINT STYLES ===== */
+@media print {
+  html, body {
+    margin: 0 !important;
+    padding: 0 !important;
+    background: white !important;
+    overflow: visible !important;
+    height: auto !important;
+    width: 100% !important;
+  }
+
+  #root, .app, .app-header, .ribbon-toolbar, .ribbon-tab-bar, .ribbon-content,
+  .document-scroll-container, .page-stack, .page-wrapper, .canvas-overlay,
+  .status-bar, .status-bar-left, .status-bar-right, .status-bar-section,
+  .page-navigator, .side-panel, .comments-panel, .find-replace-panel,
+  .context-menu, .mini-toolbar, .choose-file-btn, .rightclick-toolbar,
+  .rightclick-toolbar-btn, .fluent-dropdown, .page-number-label,
+  .page-delete-btn, .page-name-display, .page-name-input,
+  .nav-pane, .selection-pane, .symbol-picker, .link-dialog,
+  .go-to-page-dialog, .custom-margins-dialog, .custom-size-dialog,
+  .save-dialog-overlay, .save-dialog, .unsaved-modal-overlay,
+  .unsaved-modal, .help-modal-overlay, .help-modal,
+  .feedback-dialog-overlay, .feedback-dialog, .preferences-dialog,
+  .loading-screen, .toast-notification, .toast-container,
+  .zoom-controls, .scrollbar, ::-webkit-scrollbar {
+    display: none !important;
+  }
+
+  .page-wrapper {
+    display: block !important;
+    box-shadow: none !important;
+    border: none !important;
+    border-radius: 0 !important;
+    margin: 0 !important;
+    page-break-after: always !important;
+    overflow: visible !important;
+    break-inside: avoid !important;
+  }
+
+  .page-wrapper.active {
+    box-shadow: none !important;
+  }
+
+  .page-text-preview {
+    overflow: visible !important;
+    height: auto !important;
+  }
+
+  .page-header-footer {
+    position: absolute !important;
+    z-index: 1 !important;
+  }
+
+  .canvas-container, #editor-canvas, .canvas-overlay canvas,
+  .text-editor-overlay, .text-editor-shell,
+  .page-wrapper .canvas-container {
+    display: none !important;
+  }
+
+  .page-wrapper.active .text-editor-overlay,
+  .page-wrapper.active .canvas-container,
+  .page-wrapper.active #editor-canvas {
+    display: none !important;
+  }
+
+  .page-footer-num {
+    display: block !important;
+    position: absolute !important;
+    bottom: 12px !important;
+    font-size: 10px !important;
+    color: #9ca3af !important;
+    text-align: center !important;
+    width: 100% !important;
+    pointer-events: none !important;
+  }
+
+  * {
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+  }
 }
 
 .loading-screen__logo-pulse {

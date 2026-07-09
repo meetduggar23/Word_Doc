@@ -1,5 +1,3 @@
-const DEV = import.meta.env.DEV;
-
 export class ExportManager {
   static isValidBase64(str: string): boolean {
     if (typeof str !== 'string' || str.length === 0) return false;
@@ -21,14 +19,6 @@ export class ExportManager {
     const mimeType = mimeMatch ? mimeMatch[1] : 'application/octet-stream';
     const isBase64 = header.includes(';base64');
 
-    if (DEV) {
-      console.log('[ExportManager] parseDataUrl:', {
-        headerLength: header.length,
-        bodyLength: body.length, mimeType, isBase64,
-        bodyPreview: body.substring(0, 80),
-      });
-    }
-
     if (isBase64) {
       if (!ExportManager.isValidBase64(body)) {
         throw new Error('Export failed: Invalid Base64 input.');
@@ -46,7 +36,6 @@ export class ExportManager {
     if (!ExportManager.isValidBase64(base64)) {
       throw new Error('Export failed: Invalid Base64 input.');
     }
-    if (DEV) console.log('[ExportManager] base64ToBytes length:', base64.length);
     const raw = atob(base64);
     const bytes = new Uint8Array(raw.length);
     for (let i = 0; i < raw.length; i++) {
@@ -59,7 +48,6 @@ export class ExportManager {
     return html
       .replace(/<img[^>]*src="([^"]*?)"[^>]*>/gi, (_match, src) => {
         if (src && !src.startsWith('data:') && !src.startsWith('http://') && !src.startsWith('https://') && !src.startsWith('blob:')) {
-          console.warn('[ExportManager] Removing <img> with invalid src:', src.substring(0, 80));
           return '';
         }
         return _match;
@@ -73,10 +61,9 @@ export class ExportManager {
     try {
       if (document.fonts && document.fonts.ready) {
         await document.fonts.ready;
-        if (DEV) console.log('[ExportManager] Fonts ready');
       }
     } catch (err) {
-      console.warn('[ExportManager] Font loading check failed:', err);
+      void err;
     }
   }
 
@@ -95,7 +82,6 @@ export class ExportManager {
       const doc = parser.parseFromString(svg, 'image/svg+xml');
       const parseError = doc.querySelector('parsererror');
       if (parseError) {
-        console.error('[ExportManager] SVG parse error:', parseError.textContent);
         throw new Error('Export failed: SVG contains malformed XML. ' + (parseError.textContent || '').substring(0, 200));
       }
     } catch (err) {
@@ -112,14 +98,22 @@ export class ExportManager {
     const h = Math.round(page.height);
     const rawContent = (page.content && page.content.trim()) ? page.content : '<p><br></p>';
     const contentHtml = ExportManager.sanitizeHtmlContent(rawContent);
-    const imageMarkup = canvasDataUrl
-      ? `<image href="${canvasDataUrl}" x="0" y="0" width="${w}" height="${h}" preserveAspectRatio="none" />`
-      : '';
+
+    let imagePart = '';
+    if (canvasDataUrl) {
+      imagePart = `<image href="${canvasDataUrl}" x="0" y="0" width="${w}" height="${h}" preserveAspectRatio="xMidYMid meet" />`;
+    }
 
     const svg = `<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" xmlns:xhtml="http://www.w3.org/1999/xhtml" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">
+  <defs>
+    <style>
+      @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+      * { font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    </style>
+  </defs>
   <rect width="${w}" height="${h}" fill="#ffffff" />
-  ${imageMarkup}
+  ${imagePart}
   <foreignObject x="0" y="0" width="${w}" height="${h}">
     <div xmlns="http://www.w3.org/1999/xhtml" style="width:${w}px;height:${h}px;overflow:hidden;">
       ${contentHtml}
@@ -133,7 +127,6 @@ export class ExportManager {
   static rasterizeCanvasTo(
     canvas: HTMLCanvasElement,
     mimeType: 'image/png' | 'image/jpeg',
-    multiplier?: number,
     quality?: number
   ): Promise<string> {
     return new Promise((resolve, reject) => {
@@ -147,7 +140,6 @@ export class ExportManager {
           reject(new Error('Export failed: Could not get canvas 2D context.'));
           return;
         }
-        if (DEV) console.log('[ExportManager] rasterizeCanvasTo:', { mimeType, multiplier, quality });
         resolve(canvas.toDataURL(mimeType, quality ?? (mimeType === 'image/jpeg' ? 0.95 : undefined)));
       } catch (err) {
         reject(new Error('Export failed: Canvas rasterization error: ' + (err instanceof Error ? err.message : 'Unknown')));
@@ -155,65 +147,159 @@ export class ExportManager {
     });
   }
 
-  static rasterizeSvg(svg: string, mimeType: 'image/png' | 'image/jpeg'): Promise<string> {
+static rasterizeSvg(svg: string, mimeType: 'image/png' | 'image/jpeg'): Promise<string> {
     return new Promise((resolve, reject) => {
       if (!svg || typeof svg !== 'string') {
-        reject(new Error('Export failed: Invalid SVG input.'));
+        reject(new Error('ExportManager: Invalid SVG input.'));
         return;
       }
+
+      let canvasW = 800;
+      let canvasH = 600;
+      let canvasDataUrl = '';
+      let foreignContent = '';
 
       try {
-        ExportManager.validateSvg(svg);
-      } catch (err) {
-        reject(err);
+        const parser = new DOMParser();
+        const svgDoc = parser.parseFromString(svg, 'image/svg+xml');
+        const svgEl = svgDoc.documentElement;
+        canvasW = parseInt(svgEl.getAttribute('width') || '800', 10);
+        canvasH = parseInt(svgEl.getAttribute('height') || '600', 10);
+
+        const imageEl = svgDoc.querySelector('image');
+        if (imageEl) {
+          canvasDataUrl = imageEl.getAttribute('href') || imageEl.getAttributeNS('http://www.w3.org/1999/xlink', 'href') || '';
+        }
+
+        const fo = svgDoc.querySelector('foreignObject');
+        if (fo) {
+          const div = fo.querySelector('div') || fo.querySelector('*');
+          if (div) {
+            foreignContent = div.innerHTML;
+          }
+        }
+      } catch { /* ignore parse errors */ }
+
+      const canvas = document.createElement('canvas');
+      canvas.width = canvasW;
+      canvas.height = canvasH;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) {
+        reject(new Error('Export failed: Could not create canvas.'));
         return;
       }
 
-      const blob = new Blob([svg], { type: 'image/svg+xml;charset=utf-8' });
-      const url = URL.createObjectURL(blob);
-      const image = new Image();
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-      let timedOut = false;
-      const timeout = setTimeout(() => {
-        timedOut = true;
-        URL.revokeObjectURL(url);
-        reject(new Error('Export failed: SVG rasterization timed out after 15 seconds. The SVG may contain fonts or images that failed to load.'));
-      }, 15000);
-
-      image.onload = () => {
-        clearTimeout(timeout);
-        if (timedOut) return;
-        try {
-          const canvas = document.createElement('canvas');
-          canvas.width = image.width || 1;
-          canvas.height = image.height || 1;
-          const ctx = canvas.getContext('2d');
-          if (!ctx) {
-            URL.revokeObjectURL(url);
-            reject(new Error('Export failed: Could not create raster canvas.'));
-            return;
-          }
-          ctx.fillStyle = '#ffffff';
-          ctx.fillRect(0, 0, canvas.width, canvas.height);
-          ctx.drawImage(image, 0, 0);
-          URL.revokeObjectURL(url);
-          if (DEV) console.log('[ExportManager] SVG rasterized successfully:', { w: canvas.width, h: canvas.height });
+      const drawText = () => {
+        if (!foreignContent || foreignContent === '<p><br></p>') {
           resolve(canvas.toDataURL(mimeType, mimeType === 'image/jpeg' ? 0.95 : undefined));
-        } catch (err) {
-          URL.revokeObjectURL(url);
-          reject(new Error('Export failed: SVG rasterization canvas error: ' + (err instanceof Error ? err.message : 'Unknown')));
+          return;
         }
+
+        const textSvg = `<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xhtml="http://www.w3.org/1999/xhtml" width="${canvasW}" height="${canvasH}" viewBox="0 0 ${canvasW} ${canvasH}">
+  <rect width="${canvasW}" height="${canvasH}" fill="transparent" />
+  <foreignObject x="0" y="0" width="${canvasW}" height="${canvasH}">
+    <div xmlns="http://www.w3.org/1999/xhtml" style="width:${canvasW}px;height:${canvasH}px;overflow:hidden;font-family:Inter,-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;font-size:14px;line-height:1.6;color:#1a1e3b;word-wrap:break-word;white-space:pre-wrap;">${foreignContent}</div>
+  </foreignObject>
+</svg>`;
+
+        const blob = new Blob([textSvg], { type: 'image/svg+xml;charset=utf-8' });
+        const url = URL.createObjectURL(blob);
+        const textImg = new Image();
+
+        let timedOut = false;
+        const timeout = setTimeout(() => {
+          timedOut = true;
+          URL.revokeObjectURL(url);
+          ExportManager.rasterizeTextFallback(ctx, foreignContent, canvasW, canvasH, mimeType, resolve, reject);
+        }, 8000);
+
+        textImg.onload = () => {
+          clearTimeout(timeout);
+          URL.revokeObjectURL(url);
+          if (timedOut) return;
+          try {
+            ctx.drawImage(textImg, 0, 0);
+            resolve(canvas.toDataURL(mimeType, mimeType === 'image/jpeg' ? 0.95 : undefined));
+          } catch {
+            ExportManager.rasterizeTextFallback(ctx, foreignContent, canvasW, canvasH, mimeType, resolve, reject);
+          }
+        };
+
+        textImg.onerror = () => {
+          clearTimeout(timeout);
+          URL.revokeObjectURL(url);
+          ExportManager.rasterizeTextFallback(ctx, foreignContent, canvasW, canvasH, mimeType, resolve, reject);
+        };
+
+        textImg.src = url;
       };
 
-      image.onerror = (_, __, ___, ____, error) => {
-        clearTimeout(timeout);
-        URL.revokeObjectURL(url);
-        const detail = error instanceof Error ? error.message : 'Could not render SVG (possibly due to unsupported elements or missing fonts/images)';
-        reject(new Error('Export failed: SVG rasterization failed. ' + detail));
-      };
+      if (canvasDataUrl) {
+        const img = new Image();
+        const imgTimeout = setTimeout(() => {
+          canvasDataUrl = '';
+        }, 10000);
 
-      image.src = url;
+        img.onload = () => {
+          clearTimeout(imgTimeout);
+          ctx.drawImage(img, 0, 0, canvasW, canvasH);
+          drawText();
+        };
+
+        img.onerror = () => {
+          clearTimeout(imgTimeout);
+          drawText();
+        };
+
+        img.src = canvasDataUrl;
+      } else {
+        drawText();
+      }
     });
+  }
+
+  private static rasterizeTextFallback(
+    ctx: CanvasRenderingContext2D,
+    html: string,
+    _w: number,
+    h: number,
+    mimeType: 'image/png' | 'image/jpeg',
+    resolve: (value: string) => void,
+    _reject: (reason: any) => void
+  ): void {
+    try {
+      const plainText = html
+        .replace(/<br\s*\/?>/gi, '\n')
+        .replace(/<p[^>]*>/gi, '')
+        .replace(/<\/p>/gi, '\n')
+        .replace(/<[^>]*>/g, '')
+        .replace(/&nbsp;/g, ' ')
+        .replace(/&amp;/g, '&')
+        .replace(/&lt;/g, '<')
+        .replace(/&gt;/g, '>')
+        .replace(/&quot;/g, '"')
+        .trim();
+
+      if (!plainText) {
+        resolve(ctx.canvas.toDataURL(mimeType, mimeType === 'image/jpeg' ? 0.95 : undefined));
+        return;
+      }
+
+      ctx.font = '14px Inter, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif';
+      ctx.fillStyle = '#1a1e3b';
+      const lines = plainText.split('\n');
+      let dy = 20;
+      for (const line of lines) {
+        if (dy > h) break;
+        ctx.fillText(line, 10, dy);
+        dy += 22;
+      }
+    } catch { /* ignore */ }
+    resolve(ctx.canvas.toDataURL(mimeType, mimeType === 'image/jpeg' ? 0.95 : undefined));
   }
 
   static async rasterizeSvgWithFallback(
@@ -225,17 +311,15 @@ export class ExportManager {
       await ExportManager.waitForFonts();
       return await ExportManager.rasterizeSvg(svg, mimeType);
     } catch (svgErr) {
-      console.error('[ExportManager] SVG rasterization failed, trying fallback:', svgErr);
       if (fallbackCanvas) {
         try {
           const fc = fallbackCanvas();
           if (fc) {
             const result = await ExportManager.rasterizeCanvasTo(fc, mimeType);
-            console.log('[ExportManager] Fallback canvas export succeeded');
             return result;
           }
         } catch (fallbackErr) {
-          console.error('[ExportManager] Fallback canvas export also failed:', fallbackErr);
+          void fallbackErr;
         }
       }
       throw svgErr;
