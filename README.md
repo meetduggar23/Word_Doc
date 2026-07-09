@@ -1,8 +1,8 @@
-# Word doc - Free & Open Source convert them into another format 
+# Word Doc - Free & Open Source convert them into another format 
 
 A modern, lightweight, and **completely free** web-based image editor built with React, TypeScript, and Fabric.js. Create, edit, and export your designs with ease!
 
-## Contributing
+## Contributing to LM technologies
 🚀 We're actively working on new features and improvements. If you come across a bug or think something can be improved, feel free to contribute! Open a Pull Request, and I'll review your changes. If everything looks good and meets the project's standards, I'll happily merge it. Every contribution is greatly appreciated!
 
 
@@ -25,29 +25,23 @@ Export your creations in multiple formats **without any watermarks or restrictio
 - **JPG/JPEG** - Ideal for photos and smaller file sizes
 - **SVG** - Vector format for scalable graphics
 - **PDF** - Professional document format
-- **JSON** - 
+
 ### **Editing Tools**
 - Draw shapes (rectangles, circles, triangles, etc.)
 - Add and customize text
 - Freehand drawing with customizable brushes
-- Image upload and manipulation (Replace, Crop, Crop to Shape, Rotate, Flip)
-- Layer management (Bring Forward/Backward, To Front/To Back)
+- Image upload and manipulation
+- Layer management
 - Color picker and gradients
-- Full Undo/Redo history
-- Copy, Cut, Paste and Copy as Image (Clipboard API)
-- Keyboard shortcuts (Ctrl+C/V/X/Z/Y/A/D)
-- Unsaved changes detection with beforeunload warning
-- Professional right-click context menu with search bar, icons, and submenus
-- Group/Ungroup with correct bounding boxes
-- Lock Position toggle for images/shapes
+- Undo/Redo functionality
+- Grid and snap-to-grid options
 
 ###  **User-Friendly Interface**
 - Clean, modern UI with Inter font family
-- Polished desktop experience (Windows, macOS, Linux)
-- Intuitive Microsoft Word 365-style ribbon toolbar
+- Responsive design
+- Intuitive toolbar
 - Real-time preview
-- Keyboard shortcuts (Ctrl+C, Ctrl+V, Ctrl+X, Ctrl+Z, Ctrl+Y, Ctrl+A, Ctrl+D)
-- Professional right-click context menu with search
+- Keyboard shortcuts support
 
 ## Tech Stack
 
@@ -55,7 +49,7 @@ Export your creations in multiple formats **without any watermarks or restrictio
 - **TypeScript** - Type-safe JavaScript
 - **Vite** - Fast build tool and dev server
 - **Fabric.js 5** - Canvas library for graphics
-- **Lucide Icons** - SVG icon library
+- **Font Awesome 6** - Icons
 - **Inter Font** - Modern typography
 
 ### Exporting Your Work
@@ -77,29 +71,7 @@ Export your creations in multiple formats **without any watermarks or restrictio
 ✅ **Multiple Formats** - PNG, JPG, SVG, PDF , JSON support  
 ✅ **Privacy First** - All processing happens in your browser  
 ✅ **No Installation** - Runs in any modern browser  
-✅ **Cross-Platform** - Desktop-focused: Windows, macOS, Linux  
+✅ **Cross-Platform** - Works on Windows, Mac, Linux  
 
-## Platform Support
-
-| Platform | Status |
-|----------|--------|
-| Windows | ✅ Fully supported |
-| macOS | ✅ Fully supported |
-| Linux | ✅ Fully supported |
-| Mobile (iOS/Android) | 🔄 Planned for future release |
-
-This editor is optimized for **desktop** use. Mobile and tablet support are under consideration for a future release.
-
-## Contributing to LM technologies
-
-We welcome contributions! Here's how you can help:
-
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
-
-
-*Free forever. No strings attached.*
+## Free forever. No strings attached.
 
