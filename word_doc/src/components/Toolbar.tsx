@@ -97,6 +97,10 @@ interface ToolbarProps {
   customSize: { w: number; h: number };
 
   onContactSupport: () => void;
+  onDocumentation?: () => void;
+  onGitHubRepository?: () => void;
+  onReportIssue?: () => void;
+  onCheckForUpdates?: () => void;
   onFeedback: () => void;
   onShowTraining: () => void;
   onShowHelpTopic?: (topic: 'guide' | 'shortcuts' | 'about' | 'version') => void;
@@ -148,6 +152,7 @@ interface ToolbarProps {
   onCut: () => void;
   onCopy: () => void;
   onCopyAsImage?: () => void;
+  onFormatPainter?: never;
   onPaste: () => void;
   onLineSpacing: (spacing: number) => void;
   onHyperlink: () => void;
@@ -183,6 +188,7 @@ const Toolbar: React.FC<ToolbarProps> = ({
   currentShapeColor, onShapeColorChange,
   currentFilter, onApplyFilter,
   onContactSupport, onFeedback, onShowTraining, onShowHelpTopic, onZoom,
+  onDocumentation, onGitHubRepository, onReportIssue, onCheckForUpdates,
   onApplyListType, onApplyStyle, onIndent, onSetPageBackground, pageBackgroundColor,
   onToggleHeaderFooter,
   onImageTransparency, onImageBorder, onImageShadow, imageTransparency, imageShadowEnabled,
@@ -245,18 +251,9 @@ const Toolbar: React.FC<ToolbarProps> = ({
   const [fontSizePos, setFontSizePos] = useState<DropdownPos | null>(null);
   const [moreStylesPos, setMoreStylesPos] = useState<DropdownPos | null>(null);
   const fontSizeRef = useRef<HTMLDivElement>(null);
-  const borderRef = useRef<HTMLDivElement>(null);
-  const [showBorder, setShowBorder] = useState(false);
-  const [borderPos, setBorderPos] = useState<DropdownPos | null>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
   const [showWrap, setShowWrap] = useState(false);
   const [wrapPos, setWrapPos] = useState<DropdownPos | null>(null);
-  const styleRef = useRef<HTMLDivElement>(null);
-  const [showStyle, setShowStyle] = useState(false);
-  const [stylePos, setStylePos] = useState<DropdownPos | null>(null);
-  const positionRef = useRef<HTMLDivElement>(null);
-  const [showPosition, setShowPosition] = useState(false);
-  const [positionPos, setPositionPos] = useState<DropdownPos | null>(null);
   const hasArrangeSelection = isImageSelected || isShapeSelected;
 
   const calcPos = (ref: React.RefObject<HTMLDivElement | null>, width: number, alignRight = false): DropdownPos | null => {
@@ -313,9 +310,6 @@ const Toolbar: React.FC<ToolbarProps> = ({
       if (aspectRatioRef.current && !aspectRatioRef.current.contains(e.target as Node)) { setShowAspectRatio(false); setAspectRatioPos(null); }
       if (imageDropdownRef.current && !imageDropdownRef.current.contains(e.target as Node)) { setShowImageDropdown(false); setImageDropdownPos(null); }
       if (fontSizeRef.current && !fontSizeRef.current.contains(e.target as Node)) { setShowFontSize(false); setFontSizePos(null); }
-      if (borderRef.current && !borderRef.current.contains(e.target as Node)) { setShowBorder(false); setBorderPos(null); }
-      if (styleRef.current && !styleRef.current.contains(e.target as Node)) { setShowStyle(false); setStylePos(null); }
-      if (positionRef.current && !positionRef.current.contains(e.target as Node)) { setShowPosition(false); setPositionPos(null); }
       if (layoutRef.current && !layoutRef.current.contains(e.target as Node)) { setShowLayout(false); setLayoutPos(null); }
       if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) { setShowWrap(false); setWrapPos(null); }
       if (moreStylesRef.current && !moreStylesRef.current.contains(e.target as Node)) { setShowMoreStyles(false); setMoreStylesPos(null); }
@@ -387,7 +381,12 @@ const Toolbar: React.FC<ToolbarProps> = ({
 
   type TabId = 'home' | 'insert' | 'layout' | 'view' | 'review' | 'help';
 
-  void lineSpacing; void setLineSpacing; void showBorder; void borderPos; void showStyle; void stylePos; void showPosition; void positionPos;
+  const [spacingLeft, setSpacingLeft] = useState(0);
+  const [spacingRight, setSpacingRight] = useState(0);
+  const [spacingBefore, setSpacingBefore] = useState(0);
+  const [spacingAfter, setSpacingAfter] = useState(0);
+
+  void spacingLeft; void spacingRight; void spacingBefore; void spacingAfter; void setSpacingLeft; void setSpacingRight; void setSpacingBefore; void setSpacingAfter;
   void FONT_SIZES; void showFontSize; void fontSizePos;
   void isTextSelected;
   void onOpenCustomMarginsDialog; void onOpenCustomSizeDialog; void onSetPageLayoutUnit; void onSetLineNumbers; void onSetHyphenation; void onInsertBreak;
@@ -445,7 +444,19 @@ const Toolbar: React.FC<ToolbarProps> = ({
     editor.dispatchEvent(new Event('input', { bubbles: true }));
   };
 
-  const handleBorders = () => exec('insertHorizontalRule');
+  const handleBorders = () => {
+    const sel = window.getSelection();
+    const editor = document.querySelector('[data-page-editor="true"]') as HTMLElement;
+    if (editor && document.activeElement === editor && sel && !sel.isCollapsed) {
+      document.execCommand('insertHTML', false, `<span style="border:1px solid #1e293b;padding:2px 4px;">${sel.toString()}</span>`);
+      editor.dispatchEvent(new Event('input', { bubbles: true }));
+      return;
+    }
+    const active = document.querySelector('.canvas-container .active');
+    if (active) {
+      (active as HTMLElement).style.outline = '2px solid #4a6cf7';
+    }
+  };
 
   return (
     <div className="ribbon-toolbar">
@@ -520,7 +531,7 @@ const Toolbar: React.FC<ToolbarProps> = ({
                         <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
                       </svg>
                     </button>
-                    <button className="fluent-icon-btn" onClick={onCopyAsImage} title="Copy as Image" style={{ width: 30, height: 26 }}>
+<button className="fluent-icon-btn" onClick={onCopyAsImage} title="Copy as Image" style={{ width: 30, height: 26 }}>
                       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                         <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
                         <circle cx="8.5" cy="8.5" r="1.5"></circle>
@@ -603,11 +614,6 @@ const Toolbar: React.FC<ToolbarProps> = ({
                       </svg>
                     </button>
                     <div className="fluent-separator" />
-                    <button className="fluent-icon-btn" onClick={() => exec('fontSize', '7')} title="Text Effects">
-                      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                        <text x="4" y="16" fontSize="14" fontWeight="bold" fill="currentColor">A</text>
-                      </svg>
-                    </button>
                     <div className="fluent-color-btn" title="Text Highlight Color" style={{ padding: '1px 2px' }}>
                       <input type="color" className="fluent-color-swatch" value="#ffff00" onChange={e => onHighlight(e.target.value)} style={{ width: 20, height: 20 }} />
                       <svg width="6" height="6" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3"><polyline points="6 9 12 15 18 9"></polyline></svg>
@@ -1064,21 +1070,21 @@ const Toolbar: React.FC<ToolbarProps> = ({
               </div>
               <div className="fluent-divider" />
 
-              <div className="fluent-group">
+              <div className="fluent-group" style={{ minWidth: 200 }}>
                 <div className="fluent-group-items" style={{ gap: 2, flexDirection: 'column', alignItems: 'stretch', padding: '4px 8px' }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 2 }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
                       <span style={{ fontSize: 11, color: 'var(--text-secondary)', minWidth: 26 }}>Left:</span>
                       <div style={{ position: 'relative' }}>
-                        <input type="number" className="indent-spacing-input" defaultValue={0} min={0} max={100} step={0.1} />
-                        <div className="spinner-arrows"><button tabIndex={-1}>▲</button><button tabIndex={-1}>▼</button></div>
+                        <input type="number" className="indent-spacing-input" value={spacingLeft} min={0} max={100} step={0.1} onChange={e => { const v = parseFloat(e.target.value) || 0; setSpacingLeft(v); onIndent?.('in'); }} />
+                        <div className="spinner-arrows"><button tabIndex={-1} onClick={() => { setSpacingLeft(Math.min(100, spacingLeft + 0.1)); onIndent?.('in'); }}>▲</button><button tabIndex={-1} onClick={() => { setSpacingLeft(Math.max(0, spacingLeft - 0.1)); onIndent?.('out'); }}>▼</button></div>
                       </div>
                     </div>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
                       <span style={{ fontSize: 11, color: 'var(--text-secondary)', minWidth: 26 }}>Right:</span>
                       <div style={{ position: 'relative' }}>
-                        <input type="number" className="indent-spacing-input" defaultValue={0} min={0} max={100} step={0.1} />
-                        <div className="spinner-arrows"><button tabIndex={-1}>▲</button><button tabIndex={-1}>▼</button></div>
+                        <input type="number" className="indent-spacing-input" value={spacingRight} min={0} max={100} step={0.1} onChange={e => setSpacingRight(parseFloat(e.target.value) || 0)} />
+                        <div className="spinner-arrows"><button tabIndex={-1} onClick={() => setSpacingRight(Math.min(100, spacingRight + 0.1))}>▲</button><button tabIndex={-1} onClick={() => setSpacingRight(Math.max(0, spacingRight - 0.1))}>▼</button></div>
                       </div>
                     </div>
                   </div>
@@ -1086,15 +1092,15 @@ const Toolbar: React.FC<ToolbarProps> = ({
                     <div style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
                       <span style={{ fontSize: 11, color: 'var(--text-secondary)', minWidth: 36 }}>Before:</span>
                       <div style={{ position: 'relative' }}>
-                        <input type="number" className="indent-spacing-input" defaultValue={0} min={0} max={100} step={6} />
-                        <div className="spinner-arrows"><button tabIndex={-1}>▲</button><button tabIndex={-1}>▼</button></div>
+                        <input type="number" className="indent-spacing-input" value={spacingBefore} min={0} max={100} step={6} onChange={e => { const v = parseFloat(e.target.value) || 0; setSpacingBefore(v); onParagraphSpacing?.(v, spacingAfter); }} />
+                        <div className="spinner-arrows"><button tabIndex={-1} onClick={() => { setSpacingBefore(Math.min(100, spacingBefore + 6)); onParagraphSpacing?.(Math.min(100, spacingBefore + 6), spacingAfter); }}>▲</button><button tabIndex={-1} onClick={() => { setSpacingBefore(Math.max(0, spacingBefore - 6)); onParagraphSpacing?.(Math.max(0, spacingBefore - 6), spacingAfter); }}>▼</button></div>
                       </div>
                     </div>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
                       <span style={{ fontSize: 11, color: 'var(--text-secondary)', minWidth: 32 }}>After:</span>
                       <div style={{ position: 'relative' }}>
-                        <input type="number" className="indent-spacing-input" defaultValue={0} min={0} max={100} step={6} />
-                        <div className="spinner-arrows"><button tabIndex={-1}>▲</button><button tabIndex={-1}>▼</button></div>
+                        <input type="number" className="indent-spacing-input" value={spacingAfter} min={0} max={100} step={6} onChange={e => { const v = parseFloat(e.target.value) || 0; setSpacingAfter(v); onParagraphSpacing?.(spacingBefore, v); }} />
+                        <div className="spinner-arrows"><button tabIndex={-1} onClick={() => { setSpacingAfter(Math.min(100, spacingAfter + 6)); onParagraphSpacing?.(spacingBefore, Math.min(100, spacingAfter + 6)); }}>▲</button><button tabIndex={-1} onClick={() => { setSpacingAfter(Math.max(0, spacingAfter - 6)); onParagraphSpacing?.(spacingBefore, Math.max(0, spacingAfter - 6)); }}>▼</button></div>
                       </div>
                     </div>
                   </div>
@@ -1311,6 +1317,37 @@ const Toolbar: React.FC<ToolbarProps> = ({
                       <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
                     </svg>
                     <span className="fluent-btn-label">Contact Support</span>
+                  </button>
+                  <button className="fluent-btn with-icon" onClick={onDocumentation} title="Documentation">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"></path>
+                      <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 0 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"></path>
+                    </svg>
+                    <span className="fluent-btn-label">Documentation</span>
+                  </button>
+                  <button className="fluent-btn with-icon" onClick={onGitHubRepository} title="GitHub Repository">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M9 19c-5 1.5-5-2.5-7-3"></path>
+                      <path d="M15 22v-3.5c0-1 .1-1.4-.5-2 2 0 4-.5 4-4a3.5 3.5 0 0 0-1-2.5 3.2 3.2 0 0 0-.1-2.5s-.5-.2-1.6.5a5.5 5.5 0 0 0-4.6 0c-1.1-.7-1.6-.5-1.6-.5a3.2 3.2 0 0 0-.1 2.5A3.5 3.5 0 0 0 8 12c0 3.5 2 4 4 4-.3.3-.5.8-.5 1.6V22"></path>
+                    </svg>
+                    <span className="fluent-btn-label">GitHub</span>
+                  </button>
+                  <button className="fluent-btn with-icon" onClick={onReportIssue} title="Report Issue">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <circle cx="12" cy="12" r="10"></circle>
+                      <path d="M12 8v4"></path>
+                      <path d="M12 16h.01"></path>
+                    </svg>
+                    <span className="fluent-btn-label">Report Issue</span>
+                  </button>
+                  <button className="fluent-btn with-icon" onClick={onCheckForUpdates} title="Check for Updates">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M21 12a9 9 0 0 1-15.6 6.3"></path>
+                      <path d="M3 12a9 9 0 0 1 15.6-6.3"></path>
+                      <path d="M3 4v6h6"></path>
+                      <path d="M21 20v-6h-6"></path>
+                    </svg>
+                    <span className="fluent-btn-label">Check Updates</span>
                   </button>
                   <button className="fluent-btn with-icon" onClick={onFeedback} title="Send Feedback">
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">

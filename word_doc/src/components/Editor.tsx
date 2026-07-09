@@ -8,6 +8,21 @@ import { PageData, CommentData, EditorHandle } from '../types';
 import { safeGetStorageItem, safeGetStorageJson, safeSetStorageItem } from '../utils/storage';
 import { ExportManager } from '../utils/exportManager';
 
+if (fabric && fabric.Object) {
+  fabric.Object.prototype.cornerSize = 10;
+  fabric.Object.prototype.cornerStyle = 'circle';
+  fabric.Object.prototype.cornerColor = '#ffffff';
+  fabric.Object.prototype.cornerStrokeColor = '#2563eb';
+  fabric.Object.prototype.cornerDashArray = null;
+  fabric.Object.prototype.borderColor = '#2563eb';
+  fabric.Object.prototype.borderScaleFactor = 1.5;
+  fabric.Object.prototype.transparentCorners = false;
+  fabric.Object.prototype.padding = 4;
+  fabric.Object.prototype.rotatingPointOffset = 30;
+  fabric.Object.prototype.rotatingPointVisualOffset = 0;
+  fabric.Object.prototype.lockUniScaling = false;
+}
+
 function unitToPx(value: number, unit: PageLayoutUnit): number {
   return unit === 'cm' ? value * PX_PER_CM : value * PX_PER_IN;
 }
@@ -360,6 +375,53 @@ function resolvePageSize(
 
 const SYMBOLS = ['©','®','™','€','£','¥','¢','§','¶','•','†','‡','←','→','↑','↓','↔','↕','✓','✗','✘','★','☆','♥','♦','♣','♠','●','○','■','□','▲','△','▼','▽','◆','◇','Ω','α','β','γ','δ','ε','θ','λ','π','σ','τ','φ','ψ','∑','∫','∞','≠','≈','≤','≥','±','×','÷','∂','√','∏','∪','∩','⊂','⊃','⊆','⊇','∈','∉','∧','∨','¬','→','⇒','⇔','∀','∃'];
 const ZOOM_LEVELS = [0.1, 0.25, 0.5, 0.75, 1, 1.25, 1.5, 2, 3, 4, 5];
+const SERIALIZED_OBJECT_PROPS = ['name', 'link', 'cornerRadius', 'lockUniScaling'];
+
+function configureImageObject(img: any, locked = true) {
+  if (!img) return;
+  img.set({
+    selectable: true,
+    evented: true,
+    hasControls: true,
+    hasBorders: true,
+    centeredScaling: false,
+    centeredRotation: false,
+    lockUniScaling: locked,
+    lockScalingFlip: false,
+    lockMovementX: false,
+    lockMovementY: false,
+    lockRotation: false,
+    lockScalingX: false,
+    lockScalingY: false,
+    cornerSize: 10,
+    cornerStyle: 'circle',
+    cornerColor: '#ffffff',
+    cornerStrokeColor: '#2563eb',
+    borderColor: '#2563eb',
+    borderScaleFactor: 1.5,
+    transparentCorners: false,
+    padding: 4,
+    rotatingPointOffset: 30,
+    noScaleCache: false,
+    objectCaching: false,
+  });
+  if (typeof img.setControlsVisibility === 'function') {
+    img.setControlsVisibility({
+      tl: true, tr: true, bl: true, br: true,
+      ml: true, mt: true, mr: true, mb: true,
+      mtr: true,
+    });
+  }
+}
+
+function normalizeCanvasImages(canvas: any) {
+  if (!canvas?.getObjects) return;
+  canvas.getObjects().forEach((obj: any) => {
+    if (obj?.type === 'image') {
+      configureImageObject(obj, obj.lockUniScaling !== false);
+    }
+  });
+}
 
 interface EditorProps {
   docName: string;
@@ -386,12 +448,14 @@ const Editor = forwardRef<EditorHandle, EditorProps>(({ docName, setDocName }, r
 
   const [isImageSelected, setIsImageSelected] = useState(false);
   const [imageDimensions, setImageDimensions] = useState<{ w: number; h: number } | null>(null);
+  const [showDimensions, setShowDimensions] = useState(false);
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const [contextMenuIndex, setContextMenuIndex] = useState(0);
   const [showArrangeSubmenu, setShowArrangeSubmenu] = useState(false);
   const arrangeRef = useRef<HTMLDivElement>(null);
   const [arrangeSubmenuPos, setArrangeSubmenuPos] = useState<{ top: number; left: number } | null>(null);
   const contextMenuRef = useRef<HTMLDivElement>(null);
+  const toolbarRef = useRef<HTMLDivElement>(null);
   const [activeSubmenu, setActiveSubmenu] = useState<string | null>(null);
   const [contextMenuSearch, setContextMenuSearch] = useState('');
   const copiedFormattingRef = useRef<null | {
@@ -565,7 +629,7 @@ const Editor = forwardRef<EditorHandle, EditorProps>(({ docName, setDocName }, r
           const range = sel.getRangeAt(0);
           const span = document.createElement('span');
           span.style.fontSize = value + 'px';
-          try {
+try {
             range.surroundContents(span);
           } catch {
             const text = range.extractContents();
@@ -664,6 +728,7 @@ const Editor = forwardRef<EditorHandle, EditorProps>(({ docName, setDocName }, r
           });
           const activeIdx = Math.min(Math.max(data.activePageIndex || 0, 0), normalizedPages.length - 1);
           c.loadFromJSON(JSON.parse(normalizedPages[activeIdx]?.objects || '{}'), () => {
+            normalizeCanvasImages(c);
             c.renderAll();
             setPages(normalizedPages);
             setActivePageIndex(activeIdx);
@@ -681,10 +746,10 @@ const Editor = forwardRef<EditorHandle, EditorProps>(({ docName, setDocName }, r
           });
           return;
         }
-      } catch {}
+} catch (restoreErr) { console.error('Failed to restore active page', restoreErr); }
     }
 
-    const json = JSON.stringify(c.toJSON(['name', 'link', 'cornerRadius']));
+    const json = JSON.stringify(c.toJSON(SERIALIZED_OBJECT_PROPS));
     const thumb = generateThumbnail();
     const defaultPage: PageData = {
       id: 'page-1',
@@ -701,7 +766,7 @@ const Editor = forwardRef<EditorHandle, EditorProps>(({ docName, setDocName }, r
   const saveState = useCallback(() => {
     const c = canvasInstance.current;
     if (!c) return;
-    const json = JSON.stringify(c.toJSON(['name', 'link', 'cornerRadius']));
+    const json = JSON.stringify(c.toJSON(SERIALIZED_OBJECT_PROPS));
     historyRef.current = historyRef.current.slice(0, historyIdxRef.current + 1);
     historyRef.current.push(json);
     if (historyRef.current.length > MAX_HISTORY) historyRef.current.shift();
@@ -717,6 +782,7 @@ const Editor = forwardRef<EditorHandle, EditorProps>(({ docName, setDocName }, r
     const json = historyRef.current[historyIdxRef.current];
     if (!json) return;
     canvasInstance.current.loadFromJSON(JSON.parse(json), () => {
+      normalizeCanvasImages(canvasInstance.current);
       canvasInstance.current!.renderAll();
       checkCanvasEmpty();
       updateSelection();
@@ -731,6 +797,7 @@ const Editor = forwardRef<EditorHandle, EditorProps>(({ docName, setDocName }, r
     const json = historyRef.current[historyIdxRef.current];
     if (!json) return;
     canvasInstance.current.loadFromJSON(JSON.parse(json), () => {
+      normalizeCanvasImages(canvasInstance.current);
       canvasInstance.current!.renderAll();
       checkCanvasEmpty();
       updateSelection();
@@ -749,6 +816,9 @@ const Editor = forwardRef<EditorHandle, EditorProps>(({ docName, setDocName }, r
       setImageDimensions({ w: Math.round(a.width * a.scaleX), h: Math.round(a.height * a.scaleY) });
     } else {
       setImageDimensions(null);
+    }
+    if (canvasInstance.current) {
+      canvasInstance.current.uniformScaling = isImg ? (active as any)?.lockUniScaling !== false : true;
     }
     const isText = !!active && (active.type === 'i-text' || active.type === 'itext');
     setIsTextSelected(isText);
@@ -796,6 +866,8 @@ const Editor = forwardRef<EditorHandle, EditorProps>(({ docName, setDocName }, r
     setContextMenuSearch('');
     setShowArrangeSubmenu(false);
     setArrangeSubmenuPos(null);
+    setToolbarColorPicker(null);
+    setShowStyles(false);
   }, []);
 
   const getContextTargetKind = useCallback((): ContextMenuKind => {
@@ -898,65 +970,104 @@ const Editor = forwardRef<EditorHandle, EditorProps>(({ docName, setDocName }, r
     return false;
   }, []);
 
-  const promptFont = useCallback(() => {
-    const next = window.prompt('Font family', currentFont || 'Arial');
-    if (!next) return;
+const promptFont = useCallback(() => {
     const editor = document.querySelector('[data-page-editor="true"]') as HTMLElement | null;
-    if (editor && document.activeElement === editor) {
-      execInEditor('fontName', next);
-      return;
-    }
     const active = canvasInstance.current?.getActiveObject() as any;
-    if (active && (active.type === 'i-text' || active.type === 'itext')) {
-      active.set('fontFamily', next);
-      canvasInstance.current?.renderAll();
-      saveState();
-    }
+    const target = (editor && document.activeElement === editor) ? editor : (active && (active.type === 'i-text' || active.type === 'itext') ? active : null);
+    if (!target) return;
+    const current = target === editor ? document.queryCommandValue('fontName') || currentFont || 'Arial' : active.fontFamily || 'Arial';
+    const fonts = ['Arial','Calibri','Cambria','Georgia','Helvetica','Times New Roman','Verdana','Courier New','Trebuchet MS','Inter'];
+    const div = document.createElement('div');
+    div.style.cssText = 'position:fixed;top:100px;left:50%;transform:translateX(-50%);background:#fff;border:1px solid #ddd;border-radius:8px;padding:16px;z-index:10001;box-shadow:0 8px 32px rgba(0,0,0,0.15);min-width:260px;font-family:Inter,sans-serif;';
+    div.innerHTML = `<div style="font-size:14px;font-weight:600;margin-bottom:12px;color:#1e293b;">Font</div><select id="font-picker" style="width:100%;padding:6px 8px;font-size:13px;border:1px solid #d1d5db;border-radius:4px;margin-bottom:12px;">${fonts.map(f => `<option value="${f}" ${f === current ? ' selected' : ''}>${f}</option>`).join('')}</select><div style="display:flex;gap:8px;justify-content:flex-end;"><button id="font-cancel" style="padding:6px 16px;border:1px solid #d1d5db;background:#fff;border-radius:4px;cursor:pointer;font-size:12px;">Cancel</button><button id="font-ok" style="padding:6px 16px;background:#4a6cf7;color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:12px;">Apply</button></div>`;
+    document.body.appendChild(div);
+    div.querySelector('#font-cancel')?.addEventListener('click', () => div.remove());
+    div.querySelector('#font-ok')?.addEventListener('click', () => {
+      const v = (div.querySelector('#font-picker') as HTMLSelectElement)?.value;
+      if (v) {
+        if (editor && document.activeElement === editor) { execInEditor('fontName', v); }
+        else { active?.set('fontFamily', v); canvasInstance.current?.renderAll(); saveState(); }
+      }
+      div.remove();
+    });
   }, [currentFont, saveState]);
 
   const promptParagraph = useCallback(() => {
-    const next = window.prompt('Paragraph alignment: left, center, right, justify', currentTextAlign || 'left');
-    if (!next) return;
-    const align = next.toLowerCase();
-    if (['left', 'center', 'right', 'justify'].includes(align)) {
-      const editor = document.querySelector('[data-page-editor="true"]') as HTMLElement | null;
-      if (editor && document.activeElement === editor) {
-        execInEditor(align === 'justify' ? 'justifyFull' : align === 'center' ? 'justifyCenter' : align === 'right' ? 'justifyRight' : 'justifyLeft');
-      } else {
-        handleTextAlign(align);
-      }
-    }
+    const editor = document.querySelector('[data-page-editor="true"]') as HTMLElement | null;
+    if (!editor || document.activeElement !== editor) return;
+    const aligns = ['left', 'center', 'right', 'justify'];
+    const div = document.createElement('div');
+    div.style.cssText = 'position:fixed;top:100px;left:50%;transform:translateX(-50%);background:#fff;border:1px solid #ddd;border-radius:8px;padding:16px;z-index:10001;box-shadow:0 8px 32px rgba(0,0,0,0.15);min-width:220px;font-family:Inter,sans-serif;';
+    div.innerHTML = `<div style="font-size:14px;font-weight:600;margin-bottom:12px;color:#1e293b;">Paragraph Alignment</div><div id="pa-btns" style="display:flex;gap:6px;margin-bottom:12px;">${aligns.map(a => `<button data-align="${a}" style="flex:1;padding:6px;border:1px solid #d1d5db;border-radius:4px;cursor:pointer;font-size:11px;text-align:center;background:${a === currentTextAlign ? '#4a6cf7' : '#fff'};color:${a === currentTextAlign ? '#fff' : '#1e293b'};">${a.charAt(0).toUpperCase()+a.slice(1)}</button>`).join('')}</div><div style="display:flex;gap:8px;justify-content:flex-end;"><button id="pa-cancel" style="padding:6px 16px;border:1px solid #d1d5db;background:#fff;border-radius:4px;cursor:pointer;font-size:12px;">Cancel</button><button id="pa-ok" style="padding:6px 16px;background:#4a6cf7;color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:12px;">Apply</button></div>`;
+    document.body.appendChild(div);
+    const alignBtns = div.querySelectorAll('#pa-btns button[data-align]');
+    alignBtns.forEach(b => b.addEventListener('click', () => {
+      alignBtns.forEach(x => { (x as HTMLElement).style.background = '#fff'; (x as HTMLElement).style.color = '#1e293b'; });
+      (b as HTMLElement).style.background = '#4a6cf7';
+      (b as HTMLElement).style.color = '#fff';
+    }));
+    div.querySelector('#pa-cancel')?.addEventListener('click', () => div.remove());
+    div.querySelector('#pa-ok')?.addEventListener('click', () => {
+      const selected = div.querySelector('#pa-btns button[style*="rgb(74, 108, 247)"]') as HTMLElement | null;
+      const align = selected?.dataset?.align || 'left';
+      execInEditor(align === 'justify' ? 'justifyFull' : align === 'center' ? 'justifyCenter' : align === 'right' ? 'justifyRight' : 'justifyLeft');
+      div.remove();
+    });
   }, [currentTextAlign]);
 
+  const COMMON_COLORS = ['#000000','#1e293b','#444444','#666666','#999999','#aaaaaa','#cccccc','#e0e0e0','#b91c1c','#dc2626','#ef4444','#f87171','#c2410c','#ea580c','#f97316','#fb923c','#a16207','#ca8a04','#eab308','#facc15','#4d7c0f','#65a30d','#84cc16','#a3e635','#15803d','#22c55e','#4ade80','#86efac','#0f766e','#14b8a6','#2dd4bf','#5eead4','#1d4ed8','#3b82f6','#60a5fa','#93c5fd','#3730a3','#6366f1','#818cf8','#a5b4fc','#7c3aed','#8b5cf6','#a78bfa','#c4b5fd','#db2777','#ec4899','#f472b6','#f9a8d4','#ffffff'];
+
+function showColorPicker(title: string, current: string, onSelect: (color: string) => void) {
+    const div = document.createElement('div');
+    div.style.cssText = 'position:fixed;top:100px;left:50%;transform:translateX(-50%);background:#fff;border:1px solid #ddd;border-radius:8px;padding:14px;z-index:10001;box-shadow:0 8px 32px rgba(0,0,0,0.15);min-width:280px;font-family:Inter,sans-serif;';
+    const swatches = COMMON_COLORS.map(c =>
+      `<div class="cp-swatch" data-c="${c}" style="display:inline-block;width:22px;height:22px;border-radius:3px;background:${c};margin:2px;cursor:pointer;border:${c === current ? '2px solid #4a6cf7' : c === '#ffffff' || c === '#e0e0e0' ? '1px solid #ccc' : '1px solid rgba(0,0,0,0.1)'};${c === current ? 'transform:scale(1.1);' : ''}"></div>`
+    ).join('');
+    div.innerHTML = `<div style="font-size:13px;font-weight:600;margin-bottom:10px;color:#1e293b;">${title}</div><div style="width:240px;line-height:0;">${swatches}</div><div style="margin-top:8px;display:flex;gap:6px;align-items:center;"><span style="font-size:11px;color:#666;">Custom:</span><input type="color" id="cp-custom" value="${current}" style="width:40px;height:24px;border:1px solid #ddd;border-radius:3px;cursor:pointer;padding:0;"></div><div style="display:flex;gap:8px;justify-content:flex-end;margin-top:10px;"><button id="cp-cancel" style="padding:5px 14px;border:1px solid #d1d5db;background:#fff;border-radius:4px;cursor:pointer;font-size:11px;">Cancel</button></div>`;
+    document.body.appendChild(div);
+    div.querySelectorAll('.cp-swatch').forEach(el => el.addEventListener('click', () => {
+      const color = (el as HTMLElement).dataset.c || current;
+      onSelect(color);
+      div.remove();
+    }));
+    div.querySelector('#cp-custom')?.addEventListener('input', (e) => {
+      onSelect((e.target as HTMLInputElement).value);
+      div.remove();
+    });
+    div.querySelector('#cp-cancel')?.addEventListener('click', () => div.remove());
+  }
+
   const promptTextColor = useCallback(() => {
-    const next = window.prompt('Text color (hex or CSS color)', currentTextColor || defaultTextColor);
-    if (!next) return;
-    handleTextColorChange(next);
+    showColorPicker('Text Color', currentTextColor || defaultTextColor, (c) => handleTextColorChange(c));
   }, [currentTextColor, defaultTextColor]);
 
   const promptHighlight = useCallback(() => {
-    const next = window.prompt('Highlight color', '#fff59d');
-    if (!next) return;
-    handleHighlight(next);
+    showColorPicker('Highlight Color', '#ffff00', (c) => handleHighlight(c));
   }, []);
 
   const promptShapeFill = useCallback(() => {
-    const next = window.prompt('Shape fill color', currentShapeColor || '#3b82f6');
-    if (!next) return;
-    handleShapeColorChange(next);
+    showColorPicker('Fill Color', currentShapeColor || '#3b82f6', (c) => handleShapeColorChange(c));
   }, [currentShapeColor]);
 
   const promptOutlineColor = useCallback(() => {
-    const next = window.prompt('Outline color', currentBorderColor || '#000000');
-    if (!next) return;
-    handleBorderColor(next);
+    showColorPicker('Outline Color', currentBorderColor || '#000000', (c) => handleBorderColor(c));
   }, [currentBorderColor]);
 
   const promptOutlineWidth = useCallback(() => {
-    const next = window.prompt('Outline width', String(currentBorderWidth || 1));
-    if (!next) return;
-    const width = Number(next);
-    if (Number.isFinite(width) && width >= 0) handleBorderWidth(width);
+    const div = document.createElement('div');
+    div.style.cssText = 'position:fixed;top:100px;left:50%;transform:translateX(-50%);background:#fff;border:1px solid #ddd;border-radius:8px;padding:14px;z-index:10001;box-shadow:0 8px 32px rgba(0,0,0,0.15);min-width:200px;font-family:Inter,sans-serif;';
+    div.innerHTML = `<div style="font-size:13px;font-weight:600;margin-bottom:10px;color:#1e293b;">Outline Width</div><input type="range" id="ow-slider" min="0" max="20" step="1" value="${currentBorderWidth}" style="width:100%;margin-bottom:8px;"><div style="display:flex;justify-content:space-between;align-items:center;"><span id="ow-value" style="font-size:12px;color:#666;">${currentBorderWidth}px</span><button id="ow-ok" style="padding:5px 14px;background:#4a6cf7;color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:11px;">Apply</button></div>`;
+    document.body.appendChild(div);
+    div.querySelector('#ow-slider')?.addEventListener('input', (e) => {
+      const v = (e.target as HTMLInputElement).value;
+      const valEl = div.querySelector('#ow-value');
+      if (valEl) valEl.textContent = v + 'px';
+    });
+    div.querySelector('#ow-ok')?.addEventListener('click', () => {
+      const v = parseInt((div.querySelector('#ow-slider') as HTMLInputElement)?.value || '0');
+      if (Number.isFinite(v) && v >= 0) handleBorderWidth(v);
+      div.remove();
+    });
   }, [currentBorderWidth]);
 
   const pasteSpecial = useCallback(async () => {
@@ -968,7 +1079,9 @@ const Editor = forwardRef<EditorHandle, EditorProps>(({ docName, setDocName }, r
           execInEditor('insertHTML', escapeHtml(text).replace(/\r?\n/g, '<br>'));
           return;
         }
-      } catch {}
+      } catch (err) {
+        console.warn('Clipboard read failed, falling back to standard paste', err);
+      }
       document.execCommand('paste');
       return;
     }
@@ -984,7 +1097,7 @@ const Editor = forwardRef<EditorHandle, EditorProps>(({ docName, setDocName }, r
     runPagination();
 
     const currentHtml = pageTextSegmentsRef.current[currentIdx] || '';
-    const currentJson = JSON.stringify(c.toJSON(['name', 'link', 'cornerRadius']));
+    const currentJson = JSON.stringify(c.toJSON(SERIALIZED_OBJECT_PROPS));
     const thumb = generateThumbnail();
     const updatedPages = currentPages.map((p, i) =>
       i === currentIdx ? { ...p, objects: currentJson, thumbnail: thumb, content: currentHtml } : p
@@ -993,6 +1106,7 @@ const Editor = forwardRef<EditorHandle, EditorProps>(({ docName, setDocName }, r
     pagesRef.current = updatedPages;
     const targetPage = updatedPages[index];
     c.loadFromJSON(JSON.parse(targetPage.objects), () => {
+      normalizeCanvasImages(c);
       c.renderAll();
       checkCanvasEmpty();
       updateSelection();
@@ -1014,7 +1128,7 @@ const Editor = forwardRef<EditorHandle, EditorProps>(({ docName, setDocName }, r
     const currentIdx = activePageIndex;
     const currentPages = pagesRef.current;
     const currentHtml = pageTextSegmentsRef.current[currentIdx] || '';
-    const currentJson = JSON.stringify(c.toJSON(['name', 'link', 'cornerRadius']));
+    const currentJson = JSON.stringify(c.toJSON(SERIALIZED_OBJECT_PROPS));
     const thumb = generateThumbnail();
     const newIdx = currentPages.length;
     const newId = `page-${Date.now()}`;
@@ -1034,6 +1148,7 @@ const Editor = forwardRef<EditorHandle, EditorProps>(({ docName, setDocName }, r
     pagesRef.current = updatedPages;
     const newPageObj = JSON.parse(newPage.objects);
     c.loadFromJSON(newPageObj, () => {
+      normalizeCanvasImages(c);
       c.renderAll();
       checkCanvasEmpty();
       updateSelection();
@@ -1056,6 +1171,7 @@ const Editor = forwardRef<EditorHandle, EditorProps>(({ docName, setDocName }, r
     const c = canvasInstance.current;
     if (c) {
       c.loadFromJSON(JSON.parse(newPages[newIdx].objects), () => {
+        normalizeCanvasImages(c);
         c.renderAll();
         checkCanvasEmpty();
         updateSelection();
@@ -1108,6 +1224,64 @@ const Editor = forwardRef<EditorHandle, EditorProps>(({ docName, setDocName }, r
     switchToPage(index + 1);
   }, [switchToPage]);
 
+  const reorderPage = useCallback((fromIndex: number, toIndex: number) => {
+    const currentPages = pagesRef.current;
+    if (
+      fromIndex < 0 ||
+      toIndex < 0 ||
+      fromIndex >= currentPages.length ||
+      toIndex >= currentPages.length ||
+      fromIndex === toIndex
+    ) {
+      return;
+    }
+
+    runPagination();
+    const currentHtml = pageTextSegmentsRef.current[activePageIndex] || '';
+    const currentJson = canvasInstance.current
+      ? JSON.stringify(canvasInstance.current.toJSON(SERIALIZED_OBJECT_PROPS))
+      : currentPages[activePageIndex]?.objects;
+    const thumb = canvasInstance.current ? generateThumbnail() : currentPages[activePageIndex]?.thumbnail || '';
+
+    const updatedPages = currentPages.map((page, index) =>
+      index === activePageIndex
+        ? { ...page, objects: currentJson, thumbnail: thumb, content: currentHtml }
+        : page
+    );
+
+    const nextPages = [...updatedPages];
+    const [moved] = nextPages.splice(fromIndex, 1);
+    nextPages.splice(toIndex, 0, moved);
+
+    setPages(nextPages);
+    pagesRef.current = nextPages;
+
+    const nextActiveIndex = activePageIndex === fromIndex
+      ? toIndex
+      : activePageIndex > fromIndex && activePageIndex <= toIndex
+        ? activePageIndex - 1
+        : activePageIndex < fromIndex && activePageIndex >= toIndex
+          ? activePageIndex + 1
+          : activePageIndex;
+
+    setActivePageIndex(nextActiveIndex);
+
+    const c = canvasInstance.current;
+    if (c) {
+      const activePage = nextPages[nextActiveIndex];
+      if (activePage) {
+        c.loadFromJSON(JSON.parse(activePage.objects), () => {
+          normalizeCanvasImages(c);
+          c.renderAll();
+          checkCanvasEmpty();
+          updateSelection();
+          setZoom(c.getZoom());
+          saveState();
+        });
+      }
+    }
+  }, [activePageIndex, checkCanvasEmpty, generateThumbnail, runPagination, saveState, updateSelection]);
+
   const handleInsertBreak = useCallback((kind: PageBreakKind = 'page') => {
     if (execInEditor('insertHTML', createBreakMarker(kind))) {
       runPagination();
@@ -1136,8 +1310,8 @@ const Editor = forwardRef<EditorHandle, EditorProps>(({ docName, setDocName }, r
       img.set({
         left: 50, top: 50,
         scaleX: scale, scaleY: scale,
-        lockUniScaling: false, lockScalingFlip: false,
       });
+      configureImageObject(img, true);
       c.add(img);
       c.setActiveObject(img);
       c.renderAll();
@@ -1289,14 +1463,42 @@ const Editor = forwardRef<EditorHandle, EditorProps>(({ docName, setDocName }, r
       preserveObjectStacking: true,
       selection: true,
       defaultCursor: 'default',
+      perPixelTargetFind: true,
+      targetFindTolerance: 8,
+      stopContextMenu: true,
     });
+    c.uniformScaling = true;
+    c.uniScaleKey = 'shiftKey';
     canvasInstance.current = c;
 
     c.on('selection:created', () => { updateSelection(); checkCanvasEmpty(); });
     c.on('selection:updated', () => { updateSelection(); checkCanvasEmpty(); });
     c.on('selection:cleared', () => { updateSelection(); checkCanvasEmpty(); });
+    c.on('object:added', (event: any) => {
+      const obj = event?.target || event;
+      if (obj?.type === 'image') {
+        configureImageObject(obj, obj.lockUniScaling !== false);
+      }
+    });
     c.on('object:modified', () => { saveState(); checkCanvasEmpty(); });
     c.on('path:created', () => { saveState(); });
+    c.on('object:moving', () => { updateSelection(); });
+    c.on('object:scaling', () => {
+      const active = c.getActiveObject();
+      if (!active) return;
+      if (active.type === 'image') {
+        const a = active as any;
+        setImageDimensions({ w: Math.round(a.width * a.scaleX), h: Math.round(a.height * a.scaleY) });
+      }
+    });
+    c.on('mouse:down', () => {
+      if (c.getActiveObject()) {
+        setShowDimensions(true);
+      }
+    });
+    c.on('mouse:up', () => {
+      setTimeout(() => setShowDimensions(false), 100);
+    });
 
     checkCanvasEmpty();
     setTimeout(() => initDocument(), 50);
@@ -1332,11 +1534,6 @@ const Editor = forwardRef<EditorHandle, EditorProps>(({ docName, setDocName }, r
   }, []);
 
   useEffect(() => {
-    const savedName = localStorage.getItem('worddoc-last-saved-name');
-    if (savedName) {
-      setDocName(savedName);
-      safeSetStorageItem('worddoc-docname', savedName);
-    }
     const restoreData = localStorage.getItem('worddoc-restore-data');
     if (restoreData) {
       localStorage.removeItem('worddoc-restore-data');
@@ -1365,7 +1562,7 @@ const Editor = forwardRef<EditorHandle, EditorProps>(({ docName, setDocName }, r
     if (!autoSaveEnabled) return;
     const save = () => {
       if (!canvasInstance.current || !pagesRef.current.length) return;
-      const currentJson = JSON.stringify(canvasInstance.current.toJSON(['name', 'link', 'cornerRadius']));
+      const currentJson = JSON.stringify(canvasInstance.current.toJSON(SERIALIZED_OBJECT_PROPS));
       const thumb = '';
       const updatedPages = pagesRef.current.map((p, i) =>
         i === activePageIndex ? { ...p, objects: currentJson, thumbnail: thumb } : p
@@ -1381,7 +1578,7 @@ const Editor = forwardRef<EditorHandle, EditorProps>(({ docName, setDocName }, r
       try {
         localStorage.setItem('worddoc-autosave-doc', JSON.stringify(docData));
         localStorage.setItem('worddoc-autosave-time', new Date().toISOString());
-      } catch {}
+      } catch { console.warn('Autosave failed - storage may be full'); }
     };
     autoSaveTimerRef.current = window.setInterval(save, 30000);
     return () => { if (autoSaveTimerRef.current) clearInterval(autoSaveTimerRef.current); };
@@ -1396,7 +1593,10 @@ const Editor = forwardRef<EditorHandle, EditorProps>(({ docName, setDocName }, r
   useEffect(() => {
     if (!contextMenu) return;
     const handler = (e: MouseEvent) => {
-      if (contextMenuRef.current && !contextMenuRef.current.contains(e.target as Node)) {
+      const target = e.target as Node;
+      const isOutsideMenu = contextMenuRef.current && !contextMenuRef.current.contains(target);
+      const isOutsideToolbar = toolbarRef.current && !toolbarRef.current.contains(target);
+      if (isOutsideMenu && isOutsideToolbar) {
         closeContextMenu();
       }
     };
@@ -1546,6 +1746,7 @@ const Editor = forwardRef<EditorHandle, EditorProps>(({ docName, setDocName }, r
         if (active && active.type === 'image') {
           const props = { left: active.left, top: active.top, scaleX: active.scaleX, scaleY: active.scaleY, angle: active.angle };
           img.set(props);
+          configureImageObject(img, (active as any).lockUniScaling !== false);
           c.remove(active);
           c.add(img);
           c.setActiveObject(img);
@@ -1608,6 +1809,55 @@ const Editor = forwardRef<EditorHandle, EditorProps>(({ docName, setDocName }, r
     saveState();
     checkCanvasEmpty();
   }, [currentShapeColor, saveState, checkCanvasEmpty]);
+
+  const [toolbarColorPicker, setToolbarColorPicker] = useState<'text' | 'highlight' | null>(null);
+
+  const handleChangeCase = useCallback(() => {
+    const editor = document.querySelector('[data-page-editor="true"]') as HTMLElement | null;
+    if (!editor) return;
+    const sel = window.getSelection();
+    if (!sel || !sel.rangeCount || sel.isCollapsed) return;
+    const text = sel.toString();
+    if (!text) return;
+    const isUpper = text === text.toUpperCase();
+    const isLower = text === text.toLowerCase();
+    let replaced: string;
+    if (isUpper) replaced = text.toLowerCase();
+    else if (isLower) replaced = text.charAt(0).toUpperCase() + text.slice(1).toLowerCase();
+    else replaced = text.toUpperCase();
+    const range = sel.getRangeAt(0);
+    range.deleteContents();
+    range.insertNode(document.createTextNode(replaced));
+    sel.removeAllRanges();
+    sel.addRange(range);
+    hasUnsavedChangesRef.current = true;
+  }, []);
+
+  const STYLE_PRESETS = [
+    { label: 'Normal', fontSize: 28, fontWeight: '', fontStyle: '' },
+    { label: 'Heading 1', fontSize: 44, fontWeight: 'bold', fontStyle: '' },
+    { label: 'Heading 2', fontSize: 36, fontWeight: 'bold', fontStyle: '' },
+    { label: 'Heading 3', fontSize: 30, fontWeight: 'bold', fontStyle: '' },
+    { label: 'Title', fontSize: 52, fontWeight: 'bold', fontStyle: '' },
+    { label: 'Subtitle', fontSize: 34, fontWeight: '', fontStyle: 'italic' },
+  ];
+
+  const [showStyles, setShowStyles] = useState(false);
+  const stylesRef = useRef<HTMLDivElement>(null);
+
+  const handleStylesApply = useCallback((preset: typeof STYLE_PRESETS[0]) => {
+    execInEditor('fontSize', String(preset.fontSize));
+    if (preset.fontWeight) execInEditor('bold');
+    if (preset.fontStyle) execInEditor('italic');
+    const active = canvasInstance.current?.getActiveObject();
+    if (active && (active.type === 'i-text' || active.type === 'itext')) {
+      active.set({ fontSize: preset.fontSize, fontWeight: preset.fontWeight, fontStyle: preset.fontStyle });
+      canvasInstance.current?.renderAll();
+      saveState();
+    }
+    setCurrentFontSize(preset.fontSize);
+    setShowStyles(false);
+  }, [saveState]);
 
   const handleFontChange = useCallback((font: string) => {
     setCurrentFont(font);
@@ -1810,6 +2060,7 @@ const Editor = forwardRef<EditorHandle, EditorProps>(({ docName, setDocName }, r
     const active = c.getActiveObject();
     if (!active) return;
     active.clone((cloned: any) => {
+      if (cloned?.type === 'image') configureImageObject(cloned, cloned.lockUniScaling !== false);
       cloned.set({ left: (cloned.left || 0) + 20, top: (cloned.top || 0) + 20 });
       c.add(cloned);
       c.setActiveObject(cloned);
@@ -2008,6 +2259,7 @@ const Editor = forwardRef<EditorHandle, EditorProps>(({ docName, setDocName }, r
     tmpCanvas.height = (bounds.height + padding * 2) * 2;
     const tmpFabric = new fabric.StaticCanvas(tmpCanvas, { backgroundColor: 'transparent' });
     active.clone((cloned: any) => {
+      if (cloned?.type === 'image') configureImageObject(cloned, cloned.lockUniScaling !== false);
       cloned.set({
         left: padding * 2 + (bounds.width / 2 - (cloned.width * cloned.scaleX) / 2),
         top: padding * 2 + (bounds.height / 2 - (cloned.height * cloned.scaleY) / 2),
@@ -2298,7 +2550,7 @@ const Editor = forwardRef<EditorHandle, EditorProps>(({ docName, setDocName }, r
     await ExportManager.waitForFonts();
 
     const currentIdx = activePageIndex;
-    const currentJson = JSON.stringify(c.toJSON(['name', 'link', 'cornerRadius']));
+    const currentJson = JSON.stringify(c.toJSON(SERIALIZED_OBJECT_PROPS));
     const thumb = generateThumbnail();
     const updatedPages = pages.map((p, i) =>
       i === currentIdx ? { ...p, objects: currentJson, thumbnail: thumb, content: pageTextSegmentsRef.current[i] || '' } : p
@@ -2367,6 +2619,7 @@ const Editor = forwardRef<EditorHandle, EditorProps>(({ docName, setDocName }, r
         try {
           c.loadFromJSON(JSON.parse(page.objects || '{"version":"5.3.1","objects":[]}'), () => {
             try {
+              normalizeCanvasImages(c);
               c.renderAll();
               const dataUrl = c.toDataURL({ multiplier: 2 });
               resolve({ dataUrl, width: c.width, height: c.height });
@@ -2390,6 +2643,7 @@ const Editor = forwardRef<EditorHandle, EditorProps>(({ docName, setDocName }, r
     try {
       await new Promise<void>((resolve) => {
         c.loadFromJSON(JSON.parse(pagesData[activePageIndex]?.objects || '{"version":"5.3.1","objects":[]}'), () => {
+          normalizeCanvasImages(c);
           c.renderAll();
           updateSelection();
           resolve();
@@ -2493,6 +2747,7 @@ const Editor = forwardRef<EditorHandle, EditorProps>(({ docName, setDocName }, r
             });
             const activeIdx = Math.min(Math.max(data.activePageIndex || 0, 0), normalizedPages.length - 1);
             c.loadFromJSON(JSON.parse(normalizedPages[activeIdx]?.objects || '{}'), () => {
+              normalizeCanvasImages(c);
               c.renderAll();
               setPages(normalizedPages);
               pagesRef.current = normalizedPages;
@@ -2544,7 +2799,7 @@ const Editor = forwardRef<EditorHandle, EditorProps>(({ docName, setDocName }, r
     if (!canvasInstance.current || !pagesRef.current.length) return;
     const c = canvasInstance.current;
     const currentIdx = activePageIndex;
-    const currentJson = JSON.stringify(c.toJSON(['name', 'link', 'cornerRadius']));
+    const currentJson = JSON.stringify(c.toJSON(SERIALIZED_OBJECT_PROPS));
     const segments = pageTextSegmentsRef.current;
     const updatedPages = pagesRef.current.map((p, i) =>
       i === currentIdx ? { ...p, objects: currentJson, content: segments[i] || '' } : { ...p, content: segments[i] || '' }
@@ -2570,20 +2825,106 @@ const Editor = forwardRef<EditorHandle, EditorProps>(({ docName, setDocName }, r
     setTimeout(() => setShowSuccess(false), 2000);
   }, [activePageIndex, docName, headerContent, footerContent, headerEnabled, footerEnabled, differentFirstPage, comments, columns, orientation, pageBackgroundColor, layoutPreset, marginPreset, customSize, pageMargins, pageLayoutUnit, lineNumbersMode, hyphenationMode]);
 
-  const handlePrint = useCallback(() => {
+  const handlePrint = useCallback(async () => {
     const c = canvasInstance.current;
     if (!c) return;
-    const dataUrl = c.toDataURL({ multiplier: 2 });
-    const win = window.open('', '_blank');
-    if (win) {
-      win.document.write('<html><head><title>Print</title></head><body style="text-align:center;margin:0;padding:20px">');
-      win.document.write('<img src="' + dataUrl + '" style="max-width:100%;height:auto"/>');
-      win.document.write('</body></html>');
-      win.document.close();
-      win.focus();
-      setTimeout(() => win.print(), 500);
+    const printDoc = window.open('', '_blank');
+    if (!printDoc) return;
+
+    const currentPageIndex = activePageIndex;
+
+    const pageSnapshots: string[] = [];
+    for (let idx = 0; idx < pages.length; idx++) {
+      if (idx === currentPageIndex) {
+        pageSnapshots.push(c.toDataURL({ multiplier: 2, format: 'png' }));
+      } else {
+        const pageData = pages[idx];
+        if (pageData.objects && pageData.objects !== '{"version":"5.5.2","objects":[]}') {
+          try {
+            const dataUrl = await new Promise<string>((resolve) => {
+              const tmpCanvas = document.createElement('canvas');
+              tmpCanvas.width = pageData.width || pageWidth;
+              tmpCanvas.height = pageData.height || pageHeight;
+              const tmpStatic = new fabric.StaticCanvas(tmpCanvas);
+              tmpStatic.loadFromJSON(typeof pageData.objects === 'string' ? JSON.parse(pageData.objects) : pageData.objects, () => {
+                normalizeCanvasImages(tmpStatic);
+                tmpStatic.renderAll();
+                resolve(tmpStatic.toDataURL({ multiplier: 2, format: 'png' }));
+                tmpStatic.dispose();
+              });
+            });
+            pageSnapshots.push(dataUrl);
+          } catch {
+            pageSnapshots.push('');
+          }
+        } else {
+          pageSnapshots.push('');
+        }
+      }
     }
-  }, []);
+
+    const resolvedMargins = resolvePageMargins(pageMargins, pageLayoutUnit, marginPreset === 'mirrored', currentPageIndex);
+
+    let pagesHtml = '';
+    pages.forEach((page, idx) => {
+      const pw = page?.width || pageWidth;
+      const ph = page?.height || pageHeight;
+      const dataUrl = pageSnapshots[idx] || '';
+      const textHtml = pageTextSegments[idx] || '';
+      const footerNumText = `${idx + 1}`;
+
+      let innerHtml = '';
+      if (dataUrl) {
+        innerHtml += `<img src="${dataUrl}" style="display:block;width:100%;height:100%;object-fit:contain;position:absolute;top:0;left:0;z-index:1;" />`;
+      }
+      if (textHtml && textHtml !== '<p><br></p>') {
+        innerHtml += `<div style="position:absolute;top:0;left:0;right:0;bottom:0;z-index:2;padding:${resolvedMargins.top}px ${resolvedMargins.right}px ${resolvedMargins.bottom}px ${resolvedMargins.left}px;font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:14px;line-height:1.6;color:#1a1e3b;word-wrap:break-word;white-space:pre-wrap;overflow:hidden;pointer-events:none;">${textHtml}</div>`;
+      }
+      if (headerEnabled && (!differentFirstPage || idx === 0)) {
+        innerHtml += `<div style="position:absolute;top:8px;left:${resolvedMargins.left}px;right:${resolvedMargins.right}px;z-index:3;font-size:11px;font-family:'Inter',sans-serif;color:#6b7280;text-align:center;">${headerContent || ''}</div>`;
+      }
+      if (footerEnabled && (!differentFirstPage || idx === 0)) {
+        innerHtml += `<div style="position:absolute;bottom:18px;left:${resolvedMargins.left}px;right:${resolvedMargins.right}px;z-index:3;font-size:10px;font-family:'Inter',sans-serif;color:#9ca3af;text-align:center;">${footerContent || ''}</div>`;
+      }
+      innerHtml += `<div style="position:absolute;bottom:32px;left:0;width:100%;text-align:center;z-index:3;font-size:10px;color:#9ca3af;font-family:'Inter',sans-serif;pointer-events:none;">${footerNumText}</div>`;
+
+      pagesHtml += `<div class="print-page" style="width:${pw}px;height:${ph}px;page-break-after:always;position:relative;overflow:hidden;background:#fff;margin:0 auto;">${innerHtml}</div>`;
+    });
+
+    printDoc.document.write(`<!DOCTYPE html>
+<html>
+<head>
+<title>Print - ${docName}</title>
+<style>
+  @page { size: ${orientation === 'landscape' ? 'landscape' : 'portrait'}; margin:0; }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { -webkit-print-color-adjust:exact; print-color-adjust:exact; margin:0; padding:0; background:#fff; text-align:center; }
+  img { -webkit-print-color-adjust:exact; print-color-adjust:exact; }
+  @media print { body { margin:0; padding:0; } .print-page { page-break-after:always; } }
+</style>
+</head>
+<body>
+${pagesHtml}
+<script>
+(function() {
+  var imgs = document.images;
+  var len = imgs.length;
+  if (len === 0) { window.print(); window.close(); return; }
+  var loaded = 0;
+  for (var i = 0; i < len; i++) {
+    imgs[i].onload = imgs[i].onerror = function() {
+      loaded++;
+      if (loaded === len) {
+        setTimeout(function() { window.print(); setTimeout(function() { window.close(); }, 200); }, 500);
+      }
+    };
+  }
+})();
+<\/script>
+</body>
+</html>`);
+    printDoc.document.close();
+  }, [docName, pageMargins, pageLayoutUnit, marginPreset, activePageIndex, orientation, pages, pageTextSegments, pageWidth, pageHeight, headerEnabled, footerEnabled, differentFirstPage, headerContent, footerContent]);
 
   const handleFindReplace = useCallback(() => {
     setShowFindReplace(prev => !prev);
@@ -2631,7 +2972,10 @@ const Editor = forwardRef<EditorHandle, EditorProps>(({ docName, setDocName }, r
     if (!c) return;
     const active = c.getActiveObject();
     if (!active) return;
-    active.clone((cloned: any) => { clipboardRef.current = cloned; });
+    active.clone((cloned: any) => {
+      if (cloned?.type === 'image') configureImageObject(cloned, cloned.lockUniScaling !== false);
+      clipboardRef.current = cloned;
+    });
     if (active.type === 'activeSelection') {
       (active as any).forEachObject((obj: any) => c.remove(obj));
     } else {
@@ -2654,7 +2998,10 @@ const Editor = forwardRef<EditorHandle, EditorProps>(({ docName, setDocName }, r
     if (!c) return;
     const active = c.getActiveObject();
     if (!active) return;
-    active.clone((cloned: any) => { clipboardRef.current = cloned; });
+    active.clone((cloned: any) => {
+      if (cloned?.type === 'image') configureImageObject(cloned, cloned.lockUniScaling !== false);
+      clipboardRef.current = cloned;
+    });
   }, []);
 
   const handlePaste = useCallback(() => {
@@ -2668,6 +3015,7 @@ const Editor = forwardRef<EditorHandle, EditorProps>(({ docName, setDocName }, r
     if (clipboardRef.current) {
       clipboardRef.current.clone((cloned: any) => {
         cloned.set({ left: (cloned.left || 50) + 20, top: (cloned.top || 50) + 20, evented: true, selectable: true });
+        if (cloned?.type === 'image') configureImageObject(cloned, cloned.lockUniScaling !== false);
         c.add(cloned);
         c.setActiveObject(cloned);
         c.renderAll();
@@ -2709,6 +3057,7 @@ const Editor = forwardRef<EditorHandle, EditorProps>(({ docName, setDocName }, r
             const maxW = c.width * 0.6;
             const scale = Math.min(maxW / img.width, (c.height * 0.6) / img.height);
             img.set({ left: 50, top: 50, scaleX: scale, scaleY: scale });
+            configureImageObject(img, true);
             c.add(img);
             c.setActiveObject(img);
             c.renderAll();
@@ -2782,12 +3131,17 @@ const Editor = forwardRef<EditorHandle, EditorProps>(({ docName, setDocName }, r
   }, []);
 
   const handleAddComment = useCallback(() => {
-    if (!commentText.trim()) return;
+    let text = commentText.trim();
+    if (!text) {
+      const sel = window.getSelection();
+      text = sel?.toString()?.trim() || '';
+    }
+    if (!text) return;
     const activeObj = canvasInstance.current?.getActiveObject();
     const newComment: CommentData = {
       id: `comment-${Date.now()}`,
       objectId: activeObj?.name || `obj-${Date.now()}`,
-      text: commentText,
+      text,
       author: 'User',
       createdAt: new Date().toISOString(),
       resolved: false,
@@ -3114,7 +3468,7 @@ const Editor = forwardRef<EditorHandle, EditorProps>(({ docName, setDocName }, r
         if (!canvasInstance.current || !pagesRef.current.length) return;
         const c = canvasInstance.current;
         const currentIdx = activePageIndex;
-        const currentJson = JSON.stringify(c.toJSON(['name', 'link', 'cornerRadius']));
+        const currentJson = JSON.stringify(c.toJSON(SERIALIZED_OBJECT_PROPS));
         const segments = pageTextSegmentsRef.current;
         const updatedPages = pagesRef.current.map((p, i) =>
           i === currentIdx ? { ...p, objects: currentJson, content: segments[i] || '' } : { ...p, content: segments[i] || '' }
@@ -3128,7 +3482,7 @@ const Editor = forwardRef<EditorHandle, EditorProps>(({ docName, setDocName }, r
           layoutPreset, marginPreset, customSize, pageMargins, pageLayoutUnit, lineNumbersMode, hyphenationMode,
           metadata: { pageCount: updatedPages.length, savedAt: new Date().toISOString() },
         };
-        try { localStorage.setItem('worddoc-restore-data', JSON.stringify(docData)); } catch {}
+        try { localStorage.setItem('worddoc-restore-data', JSON.stringify(docData)); } catch { console.warn('Failed to save restore data'); }
         const jsonStr = exportJsonPretty ? JSON.stringify(docData, null, 2) : JSON.stringify(docData);
         const blob = new Blob([jsonStr], { type: 'application/json' });
         await ExportManager.downloadBlob(blob, fullName);
@@ -3140,7 +3494,7 @@ const Editor = forwardRef<EditorHandle, EditorProps>(({ docName, setDocName }, r
           if (active) c.discardActiveObject();
           c.renderAll();
           const currentIdx = activePageIndex;
-          const currentJson = JSON.stringify(c.toJSON(['name', 'link', 'cornerRadius']));
+          const currentJson = JSON.stringify(c.toJSON(SERIALIZED_OBJECT_PROPS));
           const thumb = generateThumbnail();
           const updatedPages = pages.map((p, i) =>
             i === currentIdx ? { ...p, objects: currentJson, thumbnail: thumb, content: pageTextSegmentsRef.current[i] || '' } : p
@@ -3183,7 +3537,7 @@ const Editor = forwardRef<EditorHandle, EditorProps>(({ docName, setDocName }, r
         const pages = pagesRef.current;
         if (c && pages.length) {
           const currentIdx = activePageIndex;
-          const currentJson = JSON.stringify(c.toJSON(['name', 'link', 'cornerRadius']));
+          const currentJson = JSON.stringify(c.toJSON(SERIALIZED_OBJECT_PROPS));
           const updatedPages = pages.map((p, i) =>
             i === currentIdx ? { ...p, objects: currentJson, content: pageTextSegmentsRef.current[i] || '' } : p
           );
@@ -3208,7 +3562,7 @@ const Editor = forwardRef<EditorHandle, EditorProps>(({ docName, setDocName }, r
         const pages = pagesRef.current;
         if (c && pages.length) {
           const currentIdx = activePageIndex;
-          const currentJson = JSON.stringify(c.toJSON(['name', 'link', 'cornerRadius']));
+          const currentJson = JSON.stringify(c.toJSON(SERIALIZED_OBJECT_PROPS));
           const thumb = generateThumbnail();
           const updatedPages = pages.map((p, i) =>
             i === currentIdx ? { ...p, objects: currentJson, thumbnail: thumb, content: pageTextSegmentsRef.current[i] || '' } : p
@@ -3256,22 +3610,44 @@ const Editor = forwardRef<EditorHandle, EditorProps>(({ docName, setDocName }, r
     }
   }, [saveDialogName, saveDialogFormat, docName, activePageIndex, generateThumbnail, runPagination, getAllPageData, headerContent, footerContent, headerEnabled, footerEnabled, differentFirstPage, comments, columns, orientation, pageBackgroundColor, layoutPreset, marginPreset, customSize, pageMargins, pageLayoutUnit, lineNumbersMode, hyphenationMode, exportJsonPretty]);
 
+  const handleContactSupport = useCallback(() => {
+    window.open('https://github.com/anomalyco/opencode/issues', '_blank');
+  }, []);
+
+  const handleDocumentation = useCallback(() => {
+    window.open('https://github.com/meetduggar23/Word_Doc#readme', '_blank', 'noopener,noreferrer');
+  }, []);
+
+  const handleGitHubRepository = useCallback(() => {
+    window.open('https://github.com/meetduggar23/Word_Doc', '_blank', 'noopener,noreferrer');
+  }, []);
+
+  const handleReportIssue = useCallback(() => {
+    window.open('https://github.com/meetduggar23/Word_Doc/issues/new/choose', '_blank', 'noopener,noreferrer');
+  }, []);
+
+  const handleCheckForUpdates = useCallback(() => {
+    window.open('https://github.com/meetduggar23/Word_Doc/releases/latest', '_blank', 'noopener,noreferrer');
+  }, []);
+
   const handleFeedback = useCallback(() => {
     setShowFeedbackDialog(true);
     setFeedbackText('');
   }, []);
 
-  const handleFeedbackSubmit = useCallback(() => {
-    if (!feedbackText.trim()) return;
-    setShowFeedbackDialog(false);
+const handleFeedbackSubmit = useCallback(() => {
+    if (feedbackText.trim()) {
+      try {
+        const existing = JSON.parse(localStorage.getItem('worddoc-feedback') || '[]');
+        existing.push({ text: feedbackText, date: new Date().toISOString() });
+        localStorage.setItem('worddoc-feedback', JSON.stringify(existing));
+      } catch { console.warn('Failed to save feedback'); }
+    }
     setFeedbackText('');
+    setShowFeedbackDialog(false);
     setShowSuccess(true);
     setTimeout(() => setShowSuccess(false), 2000);
   }, [feedbackText]);
-
-  const handleContactSupport = useCallback(() => {
-    window.open('mailto:support@worddoc.app', '_blank');
-  }, []);
 
   const handleShowTraining = useCallback(() => {
     setHelpTopic('guide');
@@ -3349,7 +3725,7 @@ const Editor = forwardRef<EditorHandle, EditorProps>(({ docName, setDocName }, r
     if ((e.ctrlKey || e.metaKey) && e.key === 'p') {
       if (isInput) return;
       e.preventDefault();
-      handleExport('pdf');
+      handlePrint();
       return;
     }
     if (e.key === 'F5' || ((e.ctrlKey || e.metaKey) && e.key === 'r')) {
@@ -3463,7 +3839,23 @@ const Editor = forwardRef<EditorHandle, EditorProps>(({ docName, setDocName }, r
       e.preventDefault();
       handleDuplicate();
     }
-  }, [handleDelete, handleCopy, handleCut, handlePaste, undo, redo, handleDuplicate, isCropMode, handleCropCancel, handleNewDocument, handleOpenDocument, handleSaveDocument, handleFindReplace, handleExport, handleToggleRibbon, switchToPage, activePageIndex, pages.length, showGoToPage, handleZoom, handleZoomTo, focusMode]);
+
+    const step = e.shiftKey ? 10 : 1;
+    const active = canvasInstance.current?.getActiveObject();
+    if (active && !isInput && !isTextEditing && !e.ctrlKey && !e.metaKey) {
+      let moved = false;
+      if (e.key === 'ArrowUp') { active.set('top', (active.top || 0) - step); moved = true; }
+      if (e.key === 'ArrowDown') { active.set('top', (active.top || 0) + step); moved = true; }
+      if (e.key === 'ArrowLeft') { active.set('left', (active.left || 0) - step); moved = true; }
+      if (e.key === 'ArrowRight') { active.set('left', (active.left || 0) + step); moved = true; }
+      if (moved) {
+        e.preventDefault();
+        active.setCoords();
+        canvasInstance.current?.renderAll();
+        saveState();
+      }
+    }
+  }, [handleDelete, handleCopy, handleCut, handlePaste, undo, redo, handleDuplicate, isCropMode, handleCropCancel, handleNewDocument, handleOpenDocument, handleSaveDocument, handleFindReplace, handleExport, handleToggleRibbon, switchToPage, activePageIndex, pages.length, showGoToPage, handleZoom, handleZoomTo, focusMode, saveState]);
 
   useEffect(() => {
     window.addEventListener('keydown', handleKeyDown);
@@ -3561,6 +3953,7 @@ const Editor = forwardRef<EditorHandle, EditorProps>(({ docName, setDocName }, r
             scale = Math.min(maxW / img.width, maxH / img.height);
           }
           img.set({ left: 50 + Math.random() * 100, top: 50 + Math.random() * 100, scaleX: scale, scaleY: scale });
+          configureImageObject(img, true);
           c.add(img);
           c.renderAll();
           saveState();
@@ -3592,6 +3985,7 @@ const Editor = forwardRef<EditorHandle, EditorProps>(({ docName, setDocName }, r
             scale = Math.min(maxW / img.width, maxH / img.height);
           }
           img.set({ left: 50, top: 50, scaleX: scale, scaleY: scale });
+          configureImageObject(img, true);
           c.add(img);
           c.setActiveObject(img);
           c.renderAll();
@@ -3802,6 +4196,8 @@ const Editor = forwardRef<EditorHandle, EditorProps>(({ docName, setDocName }, r
       shapeDiamond: 'M12 2L22 12 12 22 2 12z',
       shapeStar: 'M12 2l2.4 7.2H22l-6 4.8 2.4 7.2L12 16l-6.4 5.2L8 14l-6-4.8h7.6z',
       shapeHexagon: 'M12 2l8.5 4.9v9.8L12 22l-8.5-4.9V6.9z',
+      translate: 'M5 8l6 6M4 14l6-6 2-3M2 5h12M7 2h1M12 2h2M9 22l3-8 3 8M6 18h8',
+      readAloud: 'M11 5v14M15 7v10M19 9v6M7 9v6M3 11v2',
     };
 
     const cropShapeChildren: ContextMenuAction[] = [
@@ -3827,7 +4223,7 @@ const Editor = forwardRef<EditorHandle, EditorProps>(({ docName, setDocName }, r
       { id: 'cut', label: 'Cut', shortcut: 'Ctrl+X', icon: I.cut, onClick: handleCut },
       { id: 'copy', label: 'Copy', shortcut: 'Ctrl+C', icon: I.copy, onClick: handleCopy },
       { id: 'paste', label: 'Paste', shortcut: 'Ctrl+V', icon: I.paste, onClick: handlePaste },
-      { id: 'pasteSpecial', label: 'Paste Special', icon: I.pasteSpecial, onClick: () => { void pasteSpecial(); } },
+      { id: 'pasteSpecial', label: 'Paste as Plain Text', icon: I.pasteSpecial, onClick: () => { pasteSpecial().catch(err => console.warn('Paste special failed', err)); } },
       { id: 'copyFormatting', label: 'Copy Formatting', icon: I.copyFormatting, onClick: captureFormatting },
       { id: 'font', label: 'Font...', icon: I.font, onClick: promptFont },
       { id: 'paragraph', label: 'Paragraph...', icon: I.paragraph, onClick: promptParagraph },
@@ -3842,6 +4238,8 @@ const Editor = forwardRef<EditorHandle, EditorProps>(({ docName, setDocName }, r
       { id: 'hyperlink', label: 'Hyperlink', icon: I.hyperlink, onClick: handleOpenLink },
       { id: 'editHyperlink', label: 'Edit Hyperlink', icon: I.hyperlink, disabled: !hasLink, onClick: handleOpenLink },
       { id: 'removeHyperlink', label: 'Remove Hyperlink', icon: I.hyperlink, disabled: !hasLink, onClick: handleRemoveLink },
+      { id: 'translate', label: 'Translate', icon: I.translate, onClick: () => { const sel = window.getSelection()?.toString(); if (sel) window.open(`https://translate.google.com/?text=${encodeURIComponent(sel)}`, '_blank'); } },
+      { id: 'readAloud', label: 'Read Aloud', icon: I.readAloud, onClick: () => { const editor = document.querySelector('[data-page-editor="true"]') as HTMLElement | null; if (!editor) return; const sel = window.getSelection(); let text = sel?.toString()?.trim() || ''; if (!text && editor.textContent) { text = editor.textContent.trim(); } if (!text || !('speechSynthesis' in window)) return; window.speechSynthesis.cancel(); const u = new SpeechSynthesisUtterance(text.substring(0, 5000)); u.lang = 'en-US'; u.rate = 1; u.pitch = 1; u.volume = 1; window.speechSynthesis.speak(u); } },
       { id: 'comment', label: 'Comment', icon: I.comment, onClick: handleAddComment },
       { id: 'delete', label: 'Delete', icon: I.delete, danger: true, onClick: () => { if (isTextMode) execInEditor('delete'); else handleDelete(); } },
       { id: 'selectAll', label: 'Select All', shortcut: 'Ctrl+A', icon: I.selectAll, onClick: handleSelectAll },
@@ -3851,7 +4249,7 @@ const Editor = forwardRef<EditorHandle, EditorProps>(({ docName, setDocName }, r
       { id: 'undo', label: 'Undo', shortcut: 'Ctrl+Z', icon: I.undo, disabled: !canUndo, onClick: undo },
       { id: 'redo', label: 'Redo', shortcut: 'Ctrl+Y', icon: I.redo, disabled: !canRedo, onClick: redo },
       { id: 'paste', label: 'Paste', shortcut: 'Ctrl+V', icon: I.paste, onClick: handlePaste },
-      { id: 'pasteSpecial', label: 'Paste Special', icon: I.pasteSpecial, onClick: () => { void pasteSpecial(); } },
+      { id: 'pasteSpecial', label: 'Paste as Plain Text', icon: I.pasteSpecial, onClick: () => { pasteSpecial().catch(err => console.warn('Paste special failed', err)); } },
       { id: 'newPage', label: 'New Page', icon: I.addPage, onClick: addPage },
       { id: 'pageBreak', label: 'Page Break', icon: I.pageBreak, onClick: handlePageBreak },
       { id: 'insertText', label: 'Insert Text', icon: I.insertText, onClick: handleAddText },
@@ -3874,8 +4272,8 @@ const Editor = forwardRef<EditorHandle, EditorProps>(({ docName, setDocName }, r
       { id: 'rotateRight', label: 'Rotate Right', shortcut: 'Alt+\u2192', icon: I.rotateCW, onClick: () => { const obj = c?.getActiveObject(); if (obj) { obj.rotate(((obj.angle || 0) + 90) % 360); c?.renderAll(); saveState(); } } },
       { id: 'flipH', label: 'Flip Horizontal', icon: I.flipH, onClick: handleFlipH },
       { id: 'flipV', label: 'Flip Vertical', icon: I.flipV, onClick: handleFlipV },
-      { id: 'lockAspect', label: 'Lock Aspect Ratio', icon: isLocked ? I.lock : I.lockOpen, checked: !!isLocked, onClick: () => { const obj = c?.getActiveObject() as any; if (!obj) return; obj.lockUniScaling = !obj.lockUniScaling; c?.renderAll(); saveState(); } },
-      { id: 'compress', label: 'Compress Image', icon: I.compress, onClick: () => { /* compress placeholder - maintains compatibility */ } },
+      { id: 'lockAspect', label: 'Lock Aspect Ratio', icon: isLocked ? I.lock : I.lockOpen, checked: !!isLocked, onClick: () => { const obj = c?.getActiveObject() as any; if (!obj) return; const nextLocked = !obj.lockUniScaling; obj.lockUniScaling = nextLocked; c.uniformScaling = nextLocked; configureImageObject(obj, nextLocked); c?.renderAll(); saveState(); updateSelection(); } },
+      { id: 'compress', label: 'Compress Image', icon: I.compress, onClick: () => { const obj = c?.getActiveObject() as any; if (!obj || obj.type !== 'image') return; const origW = obj.width; const origH = obj.height; const scale = 0.5; const tmp = document.createElement('canvas'); tmp.width = Math.round(origW * scale); tmp.height = Math.round(origH * scale); const ctx = tmp.getContext('2d'); if (!ctx) return; const imgSrc = obj._originalElement || obj.getElement(); if (imgSrc) { ctx.drawImage(imgSrc, 0, 0, tmp.width, tmp.height); } const compressed = new Image(); compressed.onload = () => { fabric.Image.fromURL(compressed.src, (img: any) => { if (!img) return; const origLeft = obj.left; const origTop = obj.top; const origAngle = obj.angle; const origFlipX = obj.flipX; const origFlipY = obj.flipY; const origScaleX = obj.scaleX || 1; const origScaleY = obj.scaleY || 1; const newScaleX = origScaleX * (origW / tmp.width); const newScaleY = origScaleY * (origH / tmp.height); img.set({ left: origLeft, top: origTop, angle: origAngle, flipX: origFlipX, flipY: origFlipY, scaleX: newScaleX, scaleY: newScaleY, clipPath: obj.clipPath, cropShape: obj.cropShape, lockUniScaling: obj.lockUniScaling, lockMovementX: obj.lockMovementX, lockMovementY: obj.lockMovementY }); configureImageObject(img, obj.lockUniScaling !== false); c?.remove(obj); c?.add(img); c?.setActiveObject(img); c?.renderAll(); saveState(); }); }; compressed.src = tmp.toDataURL('image/jpeg', 0.6); hasUnsavedChangesRef.current = true; } },
       { id: 'resetPicture', label: 'Reset Picture', icon: I.resetImage, onClick: () => { const obj = c?.getActiveObject() as any; if (!obj || obj.type !== 'image') return; obj.set({ flipX: false, flipY: false, angle: 0, opacity: 1, clipPath: null, filters: [] }); obj.applyFilters(); c?.renderAll(); saveState(); } },
       { id: 'imageProps', label: 'Image Properties', icon: I.imageProperties, onClick: () => { setShowPreferences(true); } },
       { id: 'arrange', label: 'Arrange', icon: I.arrange, children: arrangeChildren },
@@ -3940,7 +4338,7 @@ const Editor = forwardRef<EditorHandle, EditorProps>(({ docName, setDocName }, r
   const contextMenuDividerAfter = useMemo(() => {
     switch (contextMenu?.kind) {
       case 'text':
-        return new Set(['redo', 'copyFormatting', 'numbering', 'highlight', 'removeHyperlink', 'comment', 'delete']);
+        return new Set(['redo', 'copyFormatting', 'numbering', 'highlight', 'comment']);
       case 'empty':
         return new Set(['redo', 'pasteSpecial', 'pageBreak', 'insertShape', 'pageNumber', 'docProps']);
       case 'image':
@@ -4180,6 +4578,17 @@ const Editor = forwardRef<EditorHandle, EditorProps>(({ docName, setDocName }, r
           lineNumbersMode={lineNumbersMode}
           hyphenationMode={hyphenationMode}
           orientation={orientation}
+          onBringForward={handleBringForward}
+          onSendBackward={handleSendBackward}
+          onBringToFront={handleBringToFront}
+          onSendToBack={handleSendToBack}
+          onGroup={handleGroup}
+          onUngroup={handleUngroup}
+          onRotate={() => handleRotate90()}
+          onAlignToPage={handleAlignToPage}
+          onAlign={handleAlign}
+          onDistribute={() => handleDistribute()}
+          onInsertBreak={handleInsertBreak}
           onToggleGridlines={handleToggleGridlines}
           onToggleFullScreen={handleToggleFullScreen}
         />
@@ -4258,7 +4667,7 @@ const Editor = forwardRef<EditorHandle, EditorProps>(({ docName, setDocName }, r
             onAddPage={addPage}
             onDeletePage={deletePage}
             onDuplicatePage={duplicatePage}
-            onReorderPage={() => {}}
+            onReorderPage={reorderPage}
           />
         )}
       <div className="editor-main-area">
@@ -4423,6 +4832,17 @@ const Editor = forwardRef<EditorHandle, EditorProps>(({ docName, setDocName }, r
           }}
         >
           <canvas ref={canvasRef} id="editor-canvas" />
+          {showDimensions && imageDimensions && (
+            <div style={{
+              position: 'absolute', bottom: 8, right: 8, zIndex: 20,
+              background: 'rgba(0,0,0,0.75)', color: '#fff',
+              padding: '4px 10px', borderRadius: 4, fontSize: 12,
+              fontFamily: 'Inter, sans-serif', pointerEvents: 'none',
+              whiteSpace: 'nowrap',
+            }}>
+              {imageDimensions.w} × {imageDimensions.h}
+            </div>
+          )}
           <TextEditor
             pageWidth={pageWidth}
             pageHeight={pageHeight}
@@ -4452,17 +4872,107 @@ const Editor = forwardRef<EditorHandle, EditorProps>(({ docName, setDocName }, r
         )}
 
         {contextMenu && (
-          <div
-            ref={contextMenuRef}
-            className="context-menu"
-            style={{ left: contextMenu.x, top: contextMenu.y }}
-            tabIndex={-1}
-            role="menu"
-            aria-label="Context menu"
-            onKeyDown={handleContextMenuItemKeyDown}
-            onClick={(e) => e.stopPropagation()}
-            onMouseLeave={() => setActiveSubmenu(null)}
-          >
+          <>
+            {contextMenu.kind === 'text' && contextMenu.y > 60 && (
+              <div
+                ref={toolbarRef}
+                className="rightclick-toolbar"
+                style={{ left: contextMenu.x, top: contextMenu.y - 50 }}
+                onClick={(e) => e.stopPropagation()}
+                onMouseDown={(e) => e.stopPropagation()}
+              >
+                <select className="rightclick-toolbar-select" value={currentFont || 'Calibri'} onChange={e => handleFontChange(e.target.value)} title="Font">
+                  {AVAILABLE_FONTS.map(f => <option key={f} value={f}>{f}</option>)}
+                </select>
+                <select className="rightclick-toolbar-select" value={currentFontSize} onChange={e => handleFontSizeChange(Number(e.target.value))} title="Font Size" style={{ width: '56px' }}>
+                  {[8,9,10,11,12,14,16,18,20,22,24,26,28,36,42,48,60,72].map(s => <option key={s} value={s}>{s}</option>)}
+                </select>
+                <button className="rightclick-toolbar-btn" onClick={handleIncreaseFontSize} title="Increase Font Size">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M4 20h16"/><path d="M12 4v16"/><path d="M8 8l-4 12"/><path d="M16 8l4 12"/></svg>
+                </button>
+                <button className="rightclick-toolbar-btn" onClick={handleDecreaseFontSize} title="Decrease Font Size">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M4 20h16"/><path d="M6 8l-2 12"/><path d="M18 8l2 12"/><path d="M10 8l-1 6h6l-1-6"/></svg>
+                </button>
+                <div className="rightclick-toolbar-divider" />
+                <button className={`rightclick-toolbar-btn${isBold ? ' active' : ''}`} onClick={handleBold} title="Bold">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M6 4h8a4 4 0 0 1 4 4 4 4 0 0 1-4 4H6z"/><path d="M6 12h9a4 4 0 0 1 4 4 4 4 0 0 1-4 4H6z"/></svg>
+                </button>
+                <button className={`rightclick-toolbar-btn${isItalic ? ' active' : ''}`} onClick={handleItalic} title="Italic">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M19 4h-9"/><path d="M14 20H5"/><path d="M15 4l-6 16"/></svg>
+                </button>
+                <button className={`rightclick-toolbar-btn${isUnderline ? ' active' : ''}`} onClick={handleUnderline} title="Underline">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M6 4v10a6 6 0 0 0 12 0V4"/><path d="M4 20h16"/></svg>
+                </button>
+                <div className="rightclick-toolbar-divider" />
+                <div style={{ position: 'relative' }}>
+                  <button className="rightclick-toolbar-color-btn" onClick={() => setToolbarColorPicker(toolbarColorPicker === 'text' ? null : 'text')} title="Font Color">
+                    <span className="rightclick-toolbar-color-swatch" style={{ backgroundColor: currentTextColor }} />
+                  </button>
+                  {toolbarColorPicker === 'text' && (
+                    <div className="rightclick-toolbar-color-picker">
+                      {['#000000','#1e293b','#444444','#666666','#999999','#aaaaaa','#cccccc','#e0e0e0','#b91c1c','#dc2626','#ef4444','#f87171','#c2410c','#ea580c','#f97316','#fb923c','#a16207','#ca8a04','#eab308','#facc15','#4d7c0f','#65a30d','#84cc16','#a3e635','#15803d','#22c55e','#4ade80','#86efac','#0f766e','#14b8a6','#2dd4bf','#5eead4','#1d4ed8','#3b82f6','#60a5fa','#93c5fd','#3730a3','#6366f1','#818cf8','#a5b4fc','#7c3aed','#8b5cf6','#a78bfa','#c4b5fd','#db2777','#ec4899','#f472b6','#f9a8d4','#ffffff'].map(c => (
+                        <div key={c} className="rightclick-toolbar-color-swatch-option" style={{ backgroundColor: c, border: c === '#ffffff' ? '1px solid #ccc' : '1px solid rgba(0,0,0,0.1)' }} onClick={() => { handleTextColorChange(c); setToolbarColorPicker(null); }} />
+                      ))}
+                    </div>
+                  )}
+                </div>
+                <div style={{ position: 'relative' }}>
+                  <button className="rightclick-toolbar-color-btn" onClick={() => setToolbarColorPicker(toolbarColorPicker === 'highlight' ? null : 'highlight')} title="Text Highlight Color">
+                    <span className="rightclick-toolbar-color-swatch" style={{ backgroundColor: '#ffff00' }} />
+                  </button>
+                  {toolbarColorPicker === 'highlight' && (
+                    <div className="rightclick-toolbar-color-picker">
+                      {['#ffff00','#00ff00','#00ffff','#ff00ff','#ff0000','#0000ff','#ffa500','#00ff80','#ff69b4','#ffff99','#99ff99','#99ffff','#ff9999','#9999ff','#ffcc99','#ffffff','#cccccc','#999999'].map(c => (
+                        <div key={c} className="rightclick-toolbar-color-swatch-option" style={{ backgroundColor: c, border: c === '#ffffff' || c === '#ffff99' ? '1px solid #ccc' : '1px solid rgba(0,0,0,0.1)' }} onClick={() => { handleHighlight(c); setToolbarColorPicker(null); }} />
+                      ))}
+                    </div>
+                  )}
+                </div>
+                <div className="rightclick-toolbar-divider" />
+                <button className="rightclick-toolbar-btn" onClick={() => execInEditor('insertUnorderedList')} title="Bullets">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M4 6h.01M4 12h.01M4 18h.01"/><path d="M8 6h12"/><path d="M8 12h12"/><path d="M8 18h12"/></svg>
+                </button>
+                <button className="rightclick-toolbar-btn" onClick={() => execInEditor('insertOrderedList')} title="Numbering">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M8 6h12"/><path d="M8 12h12"/><path d="M8 18h12"/><path d="M4 6l1-1v4"/><path d="M4 18l1-1h-1"/><path d="M4 12h1v2l-1 1"/></svg>
+                </button>
+                <div className="rightclick-toolbar-divider" />
+                <button className="rightclick-toolbar-btn" onClick={handleChangeCase} title="Change Case">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M4 20h16"/><path d="M6 8l-2 12"/><path d="M18 8l2 12"/><path d="M10 8l-1 6h6l-1-6"/></svg>
+                </button>
+                <button className="rightclick-toolbar-btn" onClick={handleClearFormatting} title="Clear Formatting">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M9 3H5a2 2 0 0 0-2 2v4m6-6h10a2 2 0 0 1 2 2v4M9 3v18m0 0h10a2 2 0 0 0 2-2V9M9 21H5a2 2 0 0 1-2-2V9"/></svg>
+                </button>
+                <div style={{ position: 'relative' }} ref={stylesRef}>
+                  <button className="rightclick-toolbar-btn" onClick={() => setShowStyles(!showStyles)} title="Styles">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
+                  </button>
+                  {showStyles && (
+                    <div className="rightclick-toolbar-color-picker" style={{ width: 'auto', minWidth: '130px', flexDirection: 'column', padding: '4px', gap: '1px' }}>
+                      {STYLE_PRESETS.map(s => (
+                        <button key={s.label} className="rightclick-toolbar-btn" style={{ width: '100%', justifyContent: 'flex-start', padding: '4px 10px', fontSize: s.label === 'Title' ? 15 : s.label === 'Subtitle' ? 14 : 13, fontWeight: (s.fontWeight || 'normal') as any, fontStyle: (s.fontStyle || 'normal') as any }} onClick={() => handleStylesApply(s)}>
+                          {s.label}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+                <div className="rightclick-toolbar-divider" />
+                <button className="rightclick-toolbar-btn" onClick={() => { handleAddComment(); }} title="New Comment">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+                </button>
+              </div>
+            )}
+            <div
+              ref={contextMenuRef}
+              className="context-menu"
+              style={{ left: contextMenu.x, top: contextMenu.y }}
+              tabIndex={-1}
+              role="menu"
+              aria-label="Context menu"
+              onKeyDown={handleContextMenuItemKeyDown}
+              onClick={(e) => e.stopPropagation()}
+              onMouseLeave={() => { setActiveSubmenu(null); setToolbarColorPicker(null); setShowStyles(false); }}
+            >
             <div className="context-menu-search">
               <div className="context-menu-search-inner">
                 <svg className="context-menu-search-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -4560,7 +5070,8 @@ const Editor = forwardRef<EditorHandle, EditorProps>(({ docName, setDocName }, r
                 </div>
               );
             })}
-          </div>
+            </div>
+          </>
         )}
 
         {showLinkDialog && (

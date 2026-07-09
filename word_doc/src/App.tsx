@@ -1,8 +1,33 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useRef, Component } from 'react';
 import Editor from './components/Editor';
 import LoadingScreen from './components/LoadingScreen';
 import type { EditorHandle } from './types';
-import { safeGetStorageItem, safeSetStorageItem } from './utils/storage';
+
+class ErrorBoundary extends Component<{ children: React.ReactNode }, { hasError: boolean; error: Error | null }> {
+  constructor(props: { children: React.ReactNode }) {
+    super(props);
+    this.state = { hasError: false, error: null };
+  }
+  static getDerivedStateFromError(error: Error) {
+    return { hasError: true, error };
+  }
+  componentDidCatch(error: Error, info: React.ErrorInfo) {
+    console.error('[ErrorBoundary] Caught:', error, info);
+  }
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div style={{ padding: 40, fontFamily: 'Inter, sans-serif', background: '#fff', height: '100vh', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center' }}>
+          <h2 style={{ color: '#dc2626', marginBottom: 12 }}>Something went wrong</h2>
+          <p style={{ color: '#666', fontSize: 14, maxWidth: 500, textAlign: 'center', marginBottom: 16 }}>{this.state.error?.message}</p>
+          <pre style={{ background: '#f8f9fb', padding: 12, borderRadius: 6, fontSize: 12, maxWidth: '80%', overflow: 'auto', color: '#666' }}>{this.state.error?.stack}</pre>
+          <button onClick={() => window.location.reload()} style={{ marginTop: 20, padding: '8px 20px', background: '#4a6cf7', color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 14 }}>Reload</button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
 
 const App: React.FC = () => {
   const [isLoading, setIsLoading] = useState(true);
@@ -17,13 +42,10 @@ const App: React.FC = () => {
     setIsAppReady(true);
   }, []);
 
-  const [docName, setDocName] = useState(() => {
-    return safeGetStorageItem('worddoc-docname', 'Document1') || 'Document1';
-  });
+  const [docName, setDocName] = useState('Document1');
 
   const handleDocNameChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     setDocName(e.target.value);
-    safeSetStorageItem('worddoc-docname', e.target.value);
     editorRef.current?.markDirty();
   };
 
@@ -31,7 +53,6 @@ const App: React.FC = () => {
     const val = e.target.value.trim();
     if (!val) {
       setDocName('Document1');
-      safeSetStorageItem('worddoc-docname', 'Document1');
     }
   };
 
@@ -77,7 +98,9 @@ const App: React.FC = () => {
           <div className="app-actions">
           </div>
         </header>
-        <Editor ref={editorRef} docName={docName} setDocName={setDocName} />
+        <ErrorBoundary>
+          <Editor ref={editorRef} docName={docName} setDocName={setDocName} />
+        </ErrorBoundary>
       </div>
     </>
   );
