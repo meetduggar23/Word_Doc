@@ -812,7 +812,7 @@ const Editor = forwardRef<EditorHandle, EditorProps>(({ docName, setDocName }, r
     return 'empty';
   }, []);
 
-  const clampContextMenuPosition = useCallback((x: number, y: number, width = 320, height = 480) => {
+  const clampContextMenuPosition = useCallback((x: number, y: number, width = 320, height = 500) => {
     const pad = 8;
     const maxX = Math.max(pad, window.innerWidth - width - pad);
     const maxY = Math.max(pad, window.innerHeight - height - pad);
