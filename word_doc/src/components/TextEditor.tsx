@@ -1,9 +1,15 @@
-import React, { useRef, useEffect, useCallback } from 'react';
+import React, { useRef, useEffect, useCallback, useMemo } from 'react';
 
 interface TextEditorProps {
   pageWidth: number;
   pageHeight: number;
   columns?: number;
+  paddingTop?: number;
+  paddingRight?: number;
+  paddingBottom?: number;
+  paddingLeft?: number;
+  lineNumbersMode?: 'none' | 'continuous' | 'restart-page' | 'restart-section';
+  hyphenationMode?: 'none' | 'automatic' | 'manual';
   content: string;
   onChange: (html: string) => void;
   onOverflow: (overflowHtml: string, fitHtml: string) => void;
@@ -11,11 +17,22 @@ interface TextEditorProps {
 }
 
 const TextEditor: React.FC<TextEditorProps> = ({
-  pageWidth, pageHeight, columns = 1, content, onChange, onOverflow, onFocusChange
+  pageWidth, pageHeight, columns = 1,
+  paddingTop = 0, paddingRight = 0, paddingBottom = 0, paddingLeft = 0,
+  lineNumbersMode = 'none', hyphenationMode = 'none',
+  content, onChange, onOverflow, onFocusChange
 }) => {
   const editorRef = useRef<HTMLDivElement>(null);
   const isInternal = useRef(false);
   const lastClickTime = useRef(0);
+  const showLineNumbers = lineNumbersMode !== 'none';
+
+  const lineNumbers = useMemo(() => {
+    const text = (content || '').replace(/<br\s*\/?>/gi, '\n').replace(/<\/p>|<\/div>|<\/li>|<li[^>]*>/gi, '\n');
+    const lines = text.split(/\n+/).map(line => line.trim()).filter(Boolean);
+    const count = Math.max(1, lines.length || 1);
+    return Array.from({ length: Math.min(count + 2, 99) }, (_, i) => i + 1);
+  }, [content, lineNumbersMode]);
 
   useEffect(() => {
     if (editorRef.current && !isInternal.current) {
@@ -33,7 +50,11 @@ const TextEditor: React.FC<TextEditorProps> = ({
     editorRef.current.style.height = pageHeight + 'px';
     editorRef.current.style.columnCount = columns > 1 ? String(columns) : 'auto';
     editorRef.current.style.columnGap = columns > 1 ? '32px' : '0';
-  }, [pageWidth, pageHeight, columns]);
+    editorRef.current.style.padding = `${paddingTop}px ${paddingRight}px ${paddingBottom}px ${paddingLeft}px`;
+    editorRef.current.style.hyphens = hyphenationMode === 'automatic' ? 'auto' : 'manual';
+    editorRef.current.style.setProperty('-webkit-hyphens', hyphenationMode === 'automatic' ? 'auto' : 'manual');
+    editorRef.current.style.wordBreak = hyphenationMode === 'manual' ? 'break-word' : 'normal';
+  }, [pageWidth, pageHeight, columns, paddingTop, paddingRight, paddingBottom, paddingLeft, hyphenationMode]);
 
   useEffect(() => {
     if (!editorRef.current) return;
@@ -147,19 +168,27 @@ const TextEditor: React.FC<TextEditorProps> = ({
   }, [pageWidth, pageHeight]);
 
   return (
-    <div
-      ref={editorRef}
-      className="text-editor-overlay"
-      contentEditable
-      suppressContentEditableWarning
-      onInput={handleInput}
-      onFocus={handleFocus}
-      onBlur={handleBlur}
-      onKeyDown={handleKeyDown}
-      onPaste={handlePaste}
-      onMouseDown={handleMouseDown}
-      data-page-editor="true"
-    />
+    <div className="text-editor-shell">
+      {showLineNumbers && (
+        <div className="text-editor-line-numbers" aria-hidden="true">
+          {lineNumbers.map(n => <span key={n}>{n}</span>)}
+        </div>
+      )}
+      <div
+        ref={editorRef}
+        className="text-editor-overlay"
+        contentEditable
+        suppressContentEditableWarning
+        onInput={handleInput}
+        onFocus={handleFocus}
+        onBlur={handleBlur}
+        onKeyDown={handleKeyDown}
+        onPaste={handlePaste}
+        onMouseDown={handleMouseDown}
+        data-page-editor="true"
+        style={showLineNumbers ? { paddingLeft: paddingLeft + 32 } : undefined}
+      />
+    </div>
   );
 };
 

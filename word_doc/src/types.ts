@@ -49,6 +49,11 @@ export interface CommentData {
   resolved: boolean;
 }
 
+export interface EditorHandle {
+  newDocument: () => void;
+  markDirty: () => void;
+}
+
 export interface ParagraphFormat {
   lineSpacing: number;
   paragraphSpacing: number;
